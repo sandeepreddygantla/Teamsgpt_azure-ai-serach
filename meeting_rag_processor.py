@@ -898,20 +898,73 @@ class MeetingProcessor:
             logger.error(f"Error processing meeting file: {e}")
             raise
     
-    def search_meetings(self, query: str, filter_meeting_id: str = None) -> List[Dict]:
-        """Search across meeting transcripts"""
+    def search_meetings(self, query: str, filter_meeting_id: str = None) -> str:
+        """Search across meeting transcripts and generate RAG response"""
         try:
             filter_expr = None
             if filter_meeting_id:
                 filter_expr = f"meeting_id eq '{filter_meeting_id}'"
             
+            # Step 1: Retrieve relevant chunks
             results = self.search_service.search(query, filter_expr)
             logger.info(f"Found {len(results)} results for query: {query}")
             
-            return results
+            if not results:
+                return "I couldn't find any relevant information in the meeting transcripts for your query."
+            
+            # Step 2: Prepare context for LLM
+            context_chunks = []
+            for result in results:
+                context_chunks.append(f"Meeting: {result['meeting_id']}\n"
+                                    f"Speakers: {', '.join(result['speakers'])}\n"
+                                    f"Content: {result['content']}\n")
+            
+            context = "\n---\n".join(context_chunks)
+            
+            # Step 3: Generate response using LLM
+            if not llm:
+                logger.warning("LLM not available, returning raw results")
+                return self._format_raw_results(results)
+            
+            prompt = f"""Based on the following meeting transcripts, answer the user's question accurately and comprehensively.
+
+User Question: {query}
+
+Meeting Transcripts:
+{context}
+
+Instructions:
+- Provide a clear, comprehensive answer based on the meeting content
+- Include specific details from the transcripts when relevant
+- Mention which speakers said what when appropriate
+- If the information spans multiple meetings, organize your response clearly
+- If you cannot find specific information, say so clearly
+
+Answer:"""
+
+            response = llm.invoke(prompt)
+            generated_answer = response.content if hasattr(response, 'content') else str(response)
+            
+            # Add source information
+            meeting_ids = list(set([r['meeting_id'] for r in results]))
+            source_info = f"\n\n**Sources**: Based on {len(results)} relevant excerpts from {len(meeting_ids)} meeting(s)."
+            
+            return generated_answer + source_info
+            
         except Exception as e:
             logger.error(f"Error searching meetings: {e}")
             raise
+    
+    def _format_raw_results(self, results: List[Dict]) -> str:
+        """Fallback formatting when LLM is not available"""
+        formatted_results = []
+        for i, result in enumerate(results, 1):
+            formatted_results.append(f"{i}. Score: {result['score']:.3f}\n"
+                                   f"   Meeting: {result['meeting_id']}\n"
+                                   f"   Speakers: {', '.join(result['speakers'])}\n"
+                                   f"   Content: {result['content'][:200]}...\n")
+        
+        return f"Found {len(results)} results:\n\n" + "\n".join(formatted_results)
 
 def test_connections():
     """Test all service connections"""
@@ -978,13 +1031,12 @@ def main():
             return
     
     if args.search:
-        results = processor.search_meetings(args.search, args.meeting_id)
-        print(f"Found {len(results)} results:")
-        for i, result in enumerate(results, 1):
-            print(f"\n{i}. Score: {result['score']:.3f}")
-            print(f"   Meeting: {result['meeting_id']}")
-            print(f"   Speakers: {', '.join(result['speakers'])}")
-            print(f"   Content: {result['content'][:200]}...")
+        response = processor.search_meetings(args.search, args.meeting_id)
+        print("\n" + "="*80)
+        print(f"QUESTION: {args.search}")
+        print("="*80)
+        print(response)
+        print("="*80)
 
 if __name__ == "__main__":
     main()

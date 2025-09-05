@@ -1,0 +1,239 @@
+2025-09-05 14:25:05,946 - INFO - Found 5 results for query: summary of new meeting
+Found 5 results:
+
+1. Score: 0.033
+   Meeting: cc96162c-2284-4b42-ae7f-c29a2acb100d
+   Speakers: Gantla, Sandeep Reddy, I would the so the goal was to get that excel sheet to the point where you can just run pivot tables off of it and you can kind of and once you have your little pivot table, you can just easily picture in your mind, OK, this is what.
+  Vautrinot, Kevin, Dubba, Jeevan R, Gwin, Michael W, Yeah.
+  Smithee, Adrian, Document Fulfillment AIML-20250627_150201-Meeting Recording
+June 27, 2025, 2:30 PM
+31m 31s
+Vautrinot, Kevin, Can we get a meeting today?
+  Smithee, Adrian
+I have not heard back yet.
+I mean.
+I'm still going back back and forth on trying to figure out it. It just seems like Billy may not be.
+You know an approver, he may not feel the need to be an approver for this project.
+We're just waiting to.
+To find out for sure.
+So that's yeah.
+  Gwin, Michael W, I like it.
+While we're waiting for other folks, Adrian, do you think I should actually start like we talked about with Michael yesterday, making those little visios for each print trail?
+  Smithee, Adrian, Another conversation I had to get done.
+So.
+How we doing?
+We got.
+We feel like we're good to demo and when I'm also curious beyond like if we demo the prompt and everything like how you got there, if if you can, if we need more time we can do it another time, but I'm anxious.
+See what you got.
+  Dubba, Jeevan R, So these are the content that are presented in the document according to Jeevan’s prompt.
+We got some output from the AI and we.
+We store it in the vector database, so in case if you have any like for the files, if we track, download the transcript from the meeting straight, you get a file similar similar to this.
+So even if you can upload this file directly and you can start asking questions, whatever the information presented in this document, right?    
+So based on that the LLM will answer the your questions about you know.
+According to the user's input, you get a response from the LLM.
+  Gwin, Michael W, So the document which we extracted from the meeting recording right yesterday
+I've shown you right that part.
+So each meeting is having separate document.
+  Gwin, Michael W, Jeevan, if you look at the print migration, if the channel the meeting happened in the same group meeting so.
+Dubba, Jeevan R, Do you want me to interrupt with questions or we just wait till you're done?
+  Gantla, Sandeep Reddy, New documents and you can ask questions about that.
+So as of now we have 7 files here.
+I have.
+  Gwin, Michael W, Let’s go with the demo.
+So here as of now you can see we have 7 documents.
+These are the seven documents that we have.
+The seven documents you can see so already uploaded here. So and we have Victor indexing tanks and participants here.
+Just kind of, you know, overview of the system here and if you wanted to ask like add new documents, you can click on here attach and you can.  
+Choose any of the file.
+This is one of the example file. I'm adding one more and if you once you upload here.
+These back end we have AAPs working on. So once you upload the document it will convert this doc into vector databases and store it in the vector database by changing the data and in the into smaller chunks and also it will store it in the vector DB.
+And it's ready to work for the LLM.
+It's ready to feed the LLM. And it’s already stored the data in the vector database.
+So when you ask the questions, it will start giving answers on the document.
+So as of now, you can see we get a successful processed message.
+So if if there is any failure occurs in the file format or anything, it will show 0 here processed zero out of documents that we have uploaded. 
+So. So as of now it’s you can see before we used to have seven documents, now it is 8 documents.
+Just now we uploaded one and vector index also increased according to the indexes.
+So we can, if you wanted to, you.
+Asked multiple questions here and you for if you wanted to clear this, you can tap on this so it will clear and it will give you the new chart. 
+So now we can start asking questions like what are the?
+These are the some prepons.
+Where I have like no define here.
+If you want, you can ask one of these Proms.
+Or you can ask any questions related to.
+Our requirement so it will.
+The back end the LLM. Will analyze your questions and generate the response according to the users.
+Questions so you can see as of this question what are the main topics from the recent meeting. So the recent meeting that we have upload and we had the date. If you look at this is the updated.
+One so we get the response from this file so you can see what all the information we have in that meeting. You will get all the information and also in case if you wanted to ask any questions related to particular week or month, right. So you can not
+About the week, like month, if you want.
+Something So what happen?
+In the June meetings, so.
+It will analyze the meetings happened in the June by the title.
+Tilt in the document with the title we had a time right date and time can see you see.
+Date. So according to this date it analyze so this this file is from this meeting is from this zoom month.
+So according to that it will give you answer say from the June you can see meeting on.
+June 10th. We have this meeting.
+This document has the information about the meeting on June 10th.
+You'll get information on June 10th.
+Again, meeting on June 19th, this document has information about, you know, meeting happen on the Zoom 19 similar way you get June 22.
+Yeah, if there is any another, you know, meetings happen in the zoom month, it will summarize in the zoom month similar way you can ask anything related to file if you want to discuss what we have discussed.
+What was?
+This.
+Caused in.
+Suppose if you say.
+In the date of 2025 and 06/02 we had a one file with this name so.
+Yep. And if you ask any questions, so it will find out then file which has this value and it will summarize those you know information from this file. According to this we can see that we have some file with 0.
+I think we used to get.
+02 and zero, I think there is no file with 02.
+Let me check.
+Migration we do have.
+Dubba, Jeevan R, Smithee, Adrian, Output will be enough sufficient for you. You know what I mean?
+  Vautrinot, Kevin, Yeah. So once we have the data right, we can ask for anything related to that, yes.
+Gantla, Sandeep Reddy, Can you upload anything?
+  Gantla, Sandeep Reddy, Way we have stored all the our documents.
+Extracted from the meeting invites and we have created.
+A rag model here and also we are giving a couple of prompts and prep.
+This is the UI so you can start asking any questions on that meeting on the particular meeting. It will give you the details.
+Yeah. So it forward to you, Sandeep.
+  Gwin, Michael W, So not maybe.
+  Smithee, Adrian
+I don't know if there's a way to link up a flow type thing to a pivot table or not, but you know, based on the components.
+And the answer is in the columns.
+But.
+Yeah, it's up to you.
+You could also you could also give it a little bit you know if you start to understand the you know the outbound communications flow like the generic flow.
+  Vautrinot, Kevin, You can use Word document or text file. As of now those two are you know working.
+I worked on the documents testing part.
+I haven't worked with the dot TXT files format, but as of now the documents is working fine.
+  Gwin, Michael W, It also works with similar if you if you have anything context related, document title or something you can ask to that information
+Dubba, Jeevan R, Adrian, do we not have a stand up today?
+Smithee, Adrian, But today we wanted to get this in just before him and I go on PTO all next week, so.
+Vautrinot, Kevin, So, like something happened with the migration meeting. So what was the discussion happen? Yeah.
+Gantla, Sandeep Reddy, Vautrinot, Kevin
+   Content: **Meeting Summary: June 27, 2025**
+
+1. **Main Topics Discussed:**
+   - The team discussed the potential creation of visual representations (Visios) for print trails, as previously talked about by Kevi...       
+
+2. Score: 0.032
+   Meeting: 3a19c946-0837-4848-9c80-8f961c42f90a
+   Speakers: Gantla, Sandeep Reddy, Jasti, Divya Sai Ajay
+   Content: **Meeting Summary:**
+
+1. **Main Topics Discussed:**
+   - The process of extracting meeting transcripts.
+   - Issues encountered with joining the correct meeting to obtain transcripts.
+
+2. **Key Decisi...
+
+3. Score: 0.032
+   Meeting: cc96162c-2284-4b42-ae7f-c29a2acb100d
+   Speakers: Jeevan, if you look at the print migration, if the channel the meeting happened in the same group meeting so.
+Dubba, Jeevan R, So, like something happened with the migration meeting. So what was the discussion happen? Yeah.
+Gantla, Sandeep Reddy, Let’s go with the demo.
+So here as of now you can see we have 7 documents.
+These are the seven documents that we have.
+The seven documents you can see so already uploaded here. So and we have Victor indexing tanks and participants here.
+Just kind of, you know, overview of the system here and if you wanted to ask like add new documents, you can click on here attach and you can.  
+Choose any of the file.
+This is one of the example file. I'm adding one more and if you once you upload here.
+These back end we have AAPs working on. So once you upload the document it will convert this doc into vector databases and store it in the vector database by changing the data and in the into smaller chunks and also it will store it in the vector DB.
+And it's ready to work for the LLM.
+It's ready to feed the LLM. And it’s already stored the data in the vector database.
+So when you ask the questions, it will start giving answers on the document.
+So as of now, you can see we get a successful processed message.
+So if if there is any failure occurs in the file format or anything, it will show 0 here processed zero out of documents that we have uploaded. 
+So. So as of now it’s you can see before we used to have seven documents, now it is 8 documents.
+Just now we uploaded one and vector index also increased according to the indexes.
+So we can, if you wanted to, you.
+Asked multiple questions here and you for if you wanted to clear this, you can tap on this so it will clear and it will give you the new chart. 
+So now we can start asking questions like what are the?
+These are the some prepons.
+Where I have like no define here.
+If you want, you can ask one of these Proms.
+Or you can ask any questions related to.
+Our requirement so it will.
+The back end the LLM. Will analyze your questions and generate the response according to the users.
+Questions so you can see as of this question what are the main topics from the recent meeting. So the recent meeting that we have upload and we had the date. If you look at this is the updated.
+One so we get the response from this file so you can see what all the information we have in that meeting. You will get all the information and also in case if you wanted to ask any questions related to particular week or month, right. So you can not
+About the week, like month, if you want.
+Something So what happen?
+In the June meetings, so.
+It will analyze the meetings happened in the June by the title.
+Tilt in the document with the title we had a time right date and time can see you see.
+Date. So according to this date it analyze so this this file is from this meeting is from this zoom month.
+So according to that it will give you answer say from the June you can see meeting on.
+June 10th. We have this meeting.
+This document has the information about the meeting on June 10th.
+You'll get information on June 10th.
+Again, meeting on June 19th, this document has information about, you know, meeting happen on the Zoom 19 similar way you get June 22.
+Yeah, if there is any another, you know, meetings happen in the zoom month, it will summarize in the zoom month similar way you can ask anything related to file if you want to discuss what we have discussed.
+What was?
+This.
+Caused in.
+Suppose if you say.
+In the date of 2025 and 06/02 we had a one file with this name so.
+Yep. And if you ask any questions, so it will find out then file which has this value and it will summarize those you know information from this file. According to this we can see that we have some file with 0.
+I think we used to get.
+02 and zero, I think there is no file with 02.
+Let me check.
+Migration we do have.
+Dubba, Jeevan R
+   Content: So these are the content that are presented in the document according to Jeevan’s prompt.
+We got some output from the AI and we.
+We store it in the vector database, so in case if you have any like for...
+
+4. Score: 0.031
+   Meeting: cc96162c-2284-4b42-ae7f-c29a2acb100d
+   Speakers: Can we get a meeting today?
+  Smithee, Adrian
+I have not heard back yet.
+I mean.
+I'm still going back back and forth on trying to figure out it. It just seems like Billy may not be.
+You know an approver, he may not feel the need to be an approver for this project.
+We're just waiting to.
+To find out for sure.
+So that's yeah.
+  Gwin, Michael W, Another conversation I had to get done.
+So.
+How we doing?
+We got.
+We feel like we're good to demo and when I'm also curious beyond like if we demo the prompt and everything like how you got there, if if you can, if we need more time we can do it another time, but I'm anxious.
+See what you got.
+  Dubba, Jeevan R, Gantla, Sandeep Reddy, Smithee, Adrian, Output will be enough sufficient for you. You know what I mean?
+  Vautrinot, Kevin, Dubba, Jeevan R, Gwin, Michael W, Vautrinot, Kevin
+   Content: So not maybe.
+  Smithee, Adrian
+I don't know if there's a way to link up a flow type thing to a pivot table or not, but you know, based on the components.
+And the answer is in the columns.
+But.
+Yeah, ...
+
+5. Score: 0.031
+   Meeting: cc96162c-2284-4b42-ae7f-c29a2acb100d
+   Speakers: I like it.
+While we're waiting for other folks, Adrian, do you think I should actually start like we talked about with Michael yesterday, making those little visios for each print trail?
+  Smithee, Adrian, Gantla, Sandeep Reddy, Smithee, Adrian, I would the so the goal was to get that excel sheet to the point where you can just run pivot tables off of it and you can kind of and once you have your little pivot table, you can just easily picture in your mind, OK, this is what.
+  Vautrinot, Kevin, Adrian, do we not have a stand up today?
+Smithee, Adrian, Output will be enough sufficient for you. You know what I mean?
+  Vautrinot, Kevin, But today we wanted to get this in just before him and I go on PTO all next week, so.
+Vautrinot, Kevin, Gwin, Michael W, Yeah.
+  Smithee, Adrian, So not maybe.
+  Smithee, Adrian
+I don't know if there's a way to link up a flow type thing to a pivot table or not, but you know, based on the components.
+And the answer is in the columns.
+But.
+Yeah, it's up to you.
+You could also you could also give it a little bit you know if you start to understand the you know the outbound communications flow like the generic flow.
+  Vautrinot, Kevin, Vautrinot, Kevin, Document Fulfillment AIML-20250627_150201-Meeting Recording
+June 27, 2025, 2:30 PM
+31m 31s
+Vautrinot, Kevin
+   Content: Document Fulfillment AIML-20250627_150201-Meeting Recording
+June 27, 2025, 2:30 PM
+31m 31s
+Vautrinot, Kevin [0:06]: Hello. Hello.
+
+Gantla, Sandeep Reddy [0:15]: Hi everyone.
+
+Smithee, Adrian [0:20]: H...
