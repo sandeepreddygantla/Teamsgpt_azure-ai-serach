@@ -3,7 +3,6 @@ langchain
 langchain-openai
 azure-search-documents
 azure-core
-psycopg2-binary
 python-docx
 PyPDF2
 python-dotenv

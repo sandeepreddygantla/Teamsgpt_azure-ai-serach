@@ -48,3 +48,5 @@ AZURE_DEPLOYMENT_GUIDE.md
 /uploads/
 AZURE_ARCHITECTURE_OVERVIEW.md
 implementation_plan.md
+/exported_data/
+test.txt

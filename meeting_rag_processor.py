@@ -13,7 +13,6 @@ import argparse
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Core imports
 from dotenv import load_dotenv
@@ -34,9 +33,6 @@ from azure.search.documents.indexes.models import (
 )
 from azure.core.credentials import AzureKeyCredential
 
-# PostgreSQL
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 # Document processing
 from docx import Document
@@ -205,9 +201,10 @@ class TranscriptParser:
         entries = []
         metadata = self._extract_metadata_from_docx(content, file_path)
         
-        # Pattern for: Speaker Name [MM:SS] or [H:MM:SS]
-        pattern = r'([^[]+?)\s*\[(\d+:\d+(?::\d+)?)\]\s*([^\n]+(?:\n(?![^[]+\[)[^\n]*)*)'
-        matches = re.findall(pattern, content, re.MULTILINE)
+        # Pattern for: Speaker Name MM:SS (with or without brackets)
+        # This handles both "Speaker [MM:SS]" and "Speaker MM:SS" formats
+        pattern = r'([A-Za-z, ]+?)\s+(?:\[)?(\d+:\d+(?::\d+)?)(?:\])?\s*\n(.*?)(?=\n[A-Za-z, ]+\s+(?:\[)?\d+:\d+|\Z)'
+        matches = re.findall(pattern, content, re.DOTALL)
         
         for match in matches:
             speaker = match[0].strip()
@@ -272,17 +269,39 @@ class TranscriptParser:
             for page in pdf_reader.pages:
                 content += page.extract_text()
         
-        # Try to parse as DOCX format first
+        # For PDFs, we'll try to parse the extracted text as if it were DOCX format
         try:
-            entries, metadata = self._parse_docx_content(content, file_path)
+            entries = []
+            metadata = {'participants': [], 'file_name': os.path.basename(file_path)}
+            
+            # Pattern for: Speaker Name MM:SS (with or without brackets)
+            # This handles both "Speaker [MM:SS]" and "Speaker MM:SS" formats
+            pattern = r'([A-Za-z, ]+?)\s+(?:\[)?(\d+:\d+(?::\d+)?)(?:\])?\s*\n(.*?)(?=\n[A-Za-z, ]+\s+(?:\[)?\d+:\d+|\Z)'
+            matches = re.findall(pattern, content, re.DOTALL)
+            
+            if not matches:
+                raise ValueError("No transcript pattern found in PDF content")
+            
+            for match in matches:
+                speaker = match[0].strip()
+                timestamp = match[1]
+                text = match[2].strip()
+                
+                timestamp_seconds = self._timestamp_to_seconds(timestamp)
+                
+                entries.append(TranscriptEntry(
+                    speaker=speaker,
+                    timestamp=timestamp,
+                    text=text,
+                    timestamp_seconds=timestamp_seconds
+                ))
+                
+                if speaker not in metadata['participants']:
+                    metadata['participants'].append(speaker)
+            
             return entries, metadata
-        except:
-            # If that fails, try VTT format
-            try:
-                entries, metadata = self._parse_vtt_content(content, file_path)
-                return entries, metadata
-            except:
-                raise ValueError("Could not parse PDF content in any known format")
+        except Exception as e:
+            raise ValueError(f"Could not parse PDF content: {e}")
     
     def _extract_metadata_from_docx(self, content: str, filename: str) -> Dict:
         """Extract meeting metadata from DOCX content"""
@@ -517,189 +536,6 @@ Transcript:
             logger.error(f"Error creating summary chunk: {e}")
             return None
 
-class DatabaseService:
-    """Handles PostgreSQL operations"""
-    
-    def __init__(self):
-        self.connection_string = os.getenv('AZURE_POSTGRES_CONNECTION_STRING')
-        if not self.connection_string:
-            raise ValueError("AZURE_POSTGRES_CONNECTION_STRING not found in environment")
-        
-        # Parse connection string
-        self.connection_params = self._parse_connection_string(self.connection_string)
-        self._create_tables()
-    
-    def _parse_connection_string(self, conn_string: str) -> Dict:
-        """Parse PostgreSQL connection string"""
-        params = {}
-        parts = conn_string.split(';')
-        
-        for part in parts:
-            if '=' in part:
-                key, value = part.split('=', 1)
-                key = key.strip().lower()
-                
-                if key == 'host':
-                    params['host'] = value
-                elif key == 'database':
-                    params['database'] = value
-                elif key == 'username':
-                    params['user'] = value
-                elif key == 'password':
-                    params['password'] = value
-                elif key == 'port':
-                    params['port'] = int(value)
-        
-        # Set defaults
-        params.setdefault('port', 5432)
-        params.setdefault('database', 'postgres')
-        
-        logger.info(f"Connecting to PostgreSQL: host={params.get('host')}, database={params.get('database')}, user={params.get('user')}")
-        
-        return params
-    
-    def get_connection(self):
-        """Get database connection"""
-        return psycopg2.connect(**self.connection_params)
-    
-    def _create_database(self):
-        """Create the database if it doesn't exist"""
-        # Connect to postgres database to create our target database
-        temp_params = self.connection_params.copy()
-        target_database = temp_params['database']
-        temp_params['database'] = 'postgres'  # Connect to default postgres db
-        
-        try:
-            conn = psycopg2.connect(**temp_params)
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute(f"CREATE DATABASE \"{target_database}\"")
-                logger.info(f"Created database: {target_database}")
-            conn.close()
-        except psycopg2.errors.DuplicateDatabase:
-            logger.info(f"Database {target_database} already exists")
-        except Exception as e:
-            logger.error(f"Error creating database: {e}")
-            raise
-    
-    def _create_tables(self):
-        """Create required tables"""
-        try:
-            # First, try to connect and create extension
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    # Check if we can connect
-                    cur.execute("SELECT version()")
-                    version = cur.fetchone()[0]
-                    logger.info(f"Connected to PostgreSQL: {version}")
-        except psycopg2.OperationalError as e:
-            if "does not exist" in str(e):
-                # Try to create the database
-                logger.warning(f"Database does not exist, trying to create it: {e}")
-                self._create_database()
-            else:
-                raise
-        
-        create_tables_sql = """        
-        CREATE TABLE IF NOT EXISTS meetings (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            title VARCHAR(255),
-            meeting_date DATE,
-            series_id VARCHAR(255),
-            file_path TEXT,
-            status VARCHAR(50) DEFAULT 'pending',
-            participants TEXT[],
-            metadata JSONB,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_meetings_series_id ON meetings(series_id);
-        CREATE INDEX IF NOT EXISTS idx_meetings_date ON meetings(meeting_date);
-        
-        CREATE TABLE IF NOT EXISTS chunks (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
-            chunk_id VARCHAR(255) UNIQUE,
-            chunk_type VARCHAR(50),
-            chunk_index INTEGER,
-            speakers TEXT[],
-            token_count INTEGER,
-            azure_search_id VARCHAR(255),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_chunks_meeting_id ON chunks(meeting_id);
-        
-        CREATE TABLE IF NOT EXISTS meeting_relationships (
-            id SERIAL PRIMARY KEY,
-            meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
-            related_meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
-            relationship_type VARCHAR(50),
-            UNIQUE(meeting_id, related_meeting_id, relationship_type)
-        );
-        """
-        
-        try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(create_tables_sql)
-                conn.commit()
-            logger.info("Database tables created successfully")
-        except Exception as e:
-            logger.error(f"Error creating tables: {e}")
-            raise
-    
-    def create_meeting(self, metadata: Dict) -> str:
-        """Create a new meeting record"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO meetings (title, meeting_date, series_id, file_path, participants, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                """, (
-                    metadata.get('meeting_title'),
-                    metadata.get('meeting_date'),
-                    metadata.get('series_id'),
-                    metadata.get('file_name'),
-                    metadata.get('participants', []),
-                    json.dumps(metadata)
-                ))
-                meeting_id = cur.fetchone()[0]
-            conn.commit()
-        
-        return str(meeting_id)
-    
-    def create_chunks(self, chunks: List[MeetingChunk]):
-        """Create chunk records"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cur:
-                for chunk in chunks:
-                    cur.execute("""
-                        INSERT INTO chunks (meeting_id, chunk_id, chunk_type, chunk_index, 
-                                          speakers, token_count, azure_search_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        chunk.meeting_id,
-                        chunk.chunk_id,
-                        chunk.chunk_type,
-                        chunk.chunk_index,
-                        chunk.speakers,
-                        chunk.token_count,
-                        chunk.chunk_id
-                    ))
-            conn.commit()
-        
-        logger.info(f"Created {len(chunks)} chunk records in database")
-    
-    def update_meeting_status(self, meeting_id: str, status: str):
-        """Update meeting status"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE meetings SET status = %s WHERE id = %s
-                """, (status, meeting_id))
-            conn.commit()
 
 class SearchService:
     """Handles Azure AI Search operations"""
@@ -723,13 +559,29 @@ class SearchService:
         # Check if index already exists
         try:
             existing_index = self.index_client.get_index(self.index_name)
-            logger.info(f"Index '{self.index_name}' already exists, using existing index")
-            return existing_index
+            logger.info(f"Index '{self.index_name}' already exists, checking if update is needed")
+            
+            # Check if the existing index has our new fields
+            existing_field_names = {field.name for field in existing_index.fields}
+            required_fields = {'document_type', 'meeting_title', 'series_id', 'participants'}
+            
+            if not required_fields.issubset(existing_field_names):
+                logger.info(f"Index missing required fields, recreating index")
+                # Delete the existing index and recreate with new schema
+                self.index_client.delete_index(self.index_name)
+                logger.info(f"Deleted existing index '{self.index_name}'")
+            else:
+                logger.info(f"Index has all required fields, using existing index")
+                return existing_index
         except Exception:
             logger.info(f"Index '{self.index_name}' doesn't exist, creating new index")
         
         fields = [
+            # Primary Keys
             SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+            SimpleField(name="document_type", type=SearchFieldDataType.String, filterable=True),
+            
+            # Content Fields
             SearchableField(name="content", type=SearchFieldDataType.String),
             SearchField(
                 name="content_vector",
@@ -738,11 +590,38 @@ class SearchService:
                 vector_search_dimensions=1536,
                 vector_search_profile_name="my-vector-profile"
             ),
+            
+            # Meeting Metadata
             SimpleField(name="meeting_id", type=SearchFieldDataType.String, filterable=True),
+            SearchableField(name="meeting_title", type=SearchFieldDataType.String, filterable=True),
+            SimpleField(name="series_id", type=SearchFieldDataType.String, filterable=True),
+            SimpleField(name="meeting_date", type=SearchFieldDataType.DateTimeOffset, 
+                       filterable=True, sortable=True),
+            SimpleField(name="file_path", type=SearchFieldDataType.String),
+            SimpleField(name="file_name", type=SearchFieldDataType.String, filterable=True),
+            SimpleField(name="status", type=SearchFieldDataType.String, filterable=True),
+            
+            # Chunk Metadata  
             SimpleField(name="chunk_type", type=SearchFieldDataType.String, filterable=True),
-            SearchableField(name="speakers", collection=True, type=SearchFieldDataType.String, filterable=True),
-            SimpleField(name="meeting_date", type=SearchFieldDataType.String, filterable=True),
             SimpleField(name="chunk_index", type=SearchFieldDataType.Int32, sortable=True),
+            SimpleField(name="token_count", type=SearchFieldDataType.Int32, filterable=True),
+            
+            # Participants & Speakers
+            SearchableField(name="speakers", collection=True, 
+                           type=SearchFieldDataType.String, filterable=True),
+            SearchableField(name="participants", collection=True, 
+                           type=SearchFieldDataType.String, filterable=True),
+            
+            # Timestamps
+            SimpleField(name="start_timestamp", type=SearchFieldDataType.String),
+            SimpleField(name="end_timestamp", type=SearchFieldDataType.String),
+            SimpleField(name="created_at", type=SearchFieldDataType.DateTimeOffset, 
+                       filterable=True, sortable=True),
+            
+            # Additional Context
+            SimpleField(name="duration", type=SearchFieldDataType.String),
+            SimpleField(name="meeting_time", type=SearchFieldDataType.String),
+            SimpleField(name="metadata_json", type=SearchFieldDataType.String),
         ]
         
         # Configure vector search
@@ -779,40 +658,94 @@ class SearchService:
             logger.error(f"Error creating search index: {e}")
             raise
     
-    def upload_documents(self, chunks: List[MeetingChunk]):
-        """Upload chunks to Azure AI Search"""
+    def _parse_meeting_date(self, date_string: str) -> str:
+        """Parse meeting date string to ISO format with timezone"""
+        if not date_string:
+            return datetime.now().isoformat() + 'Z'
+            
+        try:
+            # Try different date formats
+            for fmt in ["%B %d, %Y", "%Y-%m-%d", "%m/%d/%Y"]:
+                try:
+                    parsed_date = datetime.strptime(date_string, fmt)
+                    # Azure AI Search expects DateTimeOffset with timezone
+                    return parsed_date.isoformat() + 'Z'
+                except ValueError:
+                    continue
+            
+            # If parsing fails, return current time
+            logger.warning(f"Could not parse date '{date_string}', using current time")
+            return datetime.now().isoformat() + 'Z'
+        except Exception as e:
+            logger.error(f"Error parsing date '{date_string}': {e}")
+            return datetime.now().isoformat() + 'Z'
+
+    def upload_meeting_and_chunks(self, chunks: List[MeetingChunk], metadata: Dict) -> str:
+        """Upload meeting metadata and chunks to Azure AI Search"""
         if not embedding_model:
             raise ValueError("Embedding model not initialized")
         
         documents = []
+        meeting_id = chunks[0].meeting_id if chunks else str(uuid.uuid4())
         
-        # Generate embeddings for all chunks
-        contents = [chunk.content for chunk in chunks]
-        embeddings = embedding_model.embed_documents(contents)
+        # Create meeting-level document
+        meeting_doc = {
+            "id": f"meeting_{meeting_id}",
+            "document_type": "meeting",
+            "meeting_id": meeting_id,
+            "meeting_title": metadata.get('meeting_title', 'Unknown Meeting'),
+            "series_id": metadata.get('series_id', ''),
+            "meeting_date": self._parse_meeting_date(metadata.get('meeting_date')),
+            "file_path": metadata.get('file_path', ''),
+            "file_name": metadata.get('file_name', ''),
+            "status": "completed",
+            "participants": metadata.get('participants', []),
+            "duration": metadata.get('duration', ''),
+            "meeting_time": metadata.get('meeting_time', ''),
+            "created_at": datetime.now().isoformat() + 'Z',
+            "metadata_json": json.dumps(metadata),
+            "content": f"Meeting: {metadata.get('meeting_title', '')} on {metadata.get('meeting_date', '')}. Participants: {', '.join(metadata.get('participants', []))}",
+            "content_vector": embedding_model.embed_query(f"Meeting {metadata.get('meeting_title', '')} {metadata.get('series_id', '')}")
+        }
+        documents.append(meeting_doc)
         
-        # Create search documents
-        for chunk, embedding in zip(chunks, embeddings):
-            doc = {
-                "id": chunk.chunk_id,
-                "content": chunk.content,
-                "content_vector": embedding,
-                "meeting_id": chunk.meeting_id,
-                "chunk_type": chunk.chunk_type,
-                "speakers": chunk.speakers,
-                "meeting_date": datetime.now().isoformat(),  # You may want to extract from metadata
-                "chunk_index": chunk.chunk_index
-            }
-            documents.append(doc)
+        # Process chunks
+        if chunks:
+            contents = [chunk.content for chunk in chunks]
+            embeddings = embedding_model.embed_documents(contents)
+            
+            for chunk, embedding in zip(chunks, embeddings):
+                doc = {
+                    "id": chunk.chunk_id,
+                    "document_type": "chunk",
+                    "meeting_id": chunk.meeting_id,
+                    "meeting_title": metadata.get('meeting_title', ''),
+                    "series_id": metadata.get('series_id', ''),
+                    "meeting_date": self._parse_meeting_date(metadata.get('meeting_date')),
+                    "file_name": metadata.get('file_name', ''),
+                    "content": chunk.content,
+                    "content_vector": embedding,
+                    "chunk_type": chunk.chunk_type,
+                    "chunk_index": chunk.chunk_index,
+                    "speakers": chunk.speakers,
+                    "start_timestamp": chunk.start_timestamp,
+                    "end_timestamp": chunk.end_timestamp,
+                    "token_count": chunk.token_count,
+                    "created_at": datetime.now().isoformat() + 'Z',
+                    "status": "completed"
+                }
+                documents.append(doc)
         
         try:
             result = self.search_client.upload_documents(documents)
-            logger.info(f"Uploaded {len(documents)} documents to search index")
-            return result
+            logger.info(f"Uploaded {len(documents)} documents to search index (1 meeting + {len(chunks)} chunks)")
+            return meeting_id
         except Exception as e:
             logger.error(f"Error uploading documents: {e}")
             raise
+
     
-    def search(self, query: str, filter_expr: str = None, top: int = 5) -> List[Dict]:
+    def search(self, query: str, filter_expr: str = None, top: int = 5, document_types: List[str] = None) -> List[Dict]:
         """Perform hybrid search"""
         if not embedding_model:
             raise ValueError("Embedding model not initialized")
@@ -820,6 +753,27 @@ class SearchService:
         try:
             # Generate query embedding
             query_embedding = embedding_model.embed_query(query)
+            
+            # Build filter expression
+            filters = []
+            
+            # Filter by document types (default to chunks only)
+            if document_types is None:
+                document_types = ["chunk"]
+            
+            if document_types:
+                if len(document_types) == 1:
+                    filters.append(f"document_type eq '{document_types[0]}'")
+                else:
+                    type_filters = [f"document_type eq '{dt}'" for dt in document_types]
+                    filters.append(f"({' or '.join(type_filters)})")
+            
+            # Add custom filter if provided
+            if filter_expr:
+                filters.append(filter_expr)
+            
+            # Combine filters
+            final_filter = " and ".join(filters) if filters else None
             
             # Import VectorizedQuery for proper vector search
             from azure.search.documents.models import VectorizedQuery
@@ -832,7 +786,7 @@ class SearchService:
                     k_nearest_neighbors=top,
                     fields="content_vector"
                 )],
-                filter=filter_expr,
+                filter=final_filter,
                 top=top,
                 include_total_count=True
             )
@@ -843,8 +797,11 @@ class SearchService:
                     "id": result["id"],
                     "content": result["content"],
                     "meeting_id": result["meeting_id"],
-                    "chunk_type": result["chunk_type"],
-                    "speakers": result["speakers"],
+                    "chunk_type": result.get("chunk_type", ""),
+                    "speakers": result.get("speakers", []),
+                    "meeting_title": result.get("meeting_title", ""),
+                    "series_id": result.get("series_id", ""),
+                    "document_type": result.get("document_type", ""),
                     "score": result["@search.score"]
                 })
             
@@ -859,7 +816,6 @@ class MeetingProcessor:
     def __init__(self):
         self.parser = TranscriptParser()
         self.chunker = ChunkingService()
-        self.db_service = DatabaseService()
         self.search_service = SearchService()
     
     def process_meeting_file(self, file_path: str) -> str:
@@ -871,25 +827,21 @@ class MeetingProcessor:
             entries, metadata = self.parser.parse_file(file_path)
             logger.info(f"Parsed {len(entries)} transcript entries")
             
-            # Step 2: Create meeting record
-            meeting_id = self.db_service.create_meeting(metadata)
-            logger.info(f"Created meeting record: {meeting_id}")
+            # Step 2: Generate meeting ID
+            meeting_id = str(uuid.uuid4())
+            metadata['file_path'] = file_path  # Add file path to metadata
+            logger.info(f"Generated meeting ID: {meeting_id}")
             
             # Step 3: Create chunks
             chunks = self.chunker.create_chunks(entries, meeting_id)
             logger.info(f"Created {len(chunks)} chunks")
             
-            # Step 4: Store chunks in database
-            self.db_service.create_chunks(chunks)
-            
-            # Step 5: Upload to search index (only if we have chunks)
-            if chunks:
-                self.search_service.upload_documents(chunks)
+            # Step 4: Upload meeting and chunks to AI Search
+            if chunks or metadata:  # Upload even if no chunks, for meeting metadata
+                meeting_id = self.search_service.upload_meeting_and_chunks(chunks, metadata)
+                logger.info(f"Uploaded meeting and chunks to search index")
             else:
-                logger.warning("No chunks created, skipping search index upload")
-            
-            # Step 6: Update meeting status
-            self.db_service.update_meeting_status(meeting_id, 'completed')
+                logger.warning("No chunks or metadata to upload")
             
             logger.info(f"Successfully processed meeting: {meeting_id}")
             return meeting_id
@@ -988,17 +940,6 @@ def test_connections():
             logger.error("❌ OpenAI LLM: Not initialized")
     except Exception as e:
         logger.error(f"❌ OpenAI LLM: {e}")
-    
-    # Test PostgreSQL
-    try:
-        db_service = DatabaseService()
-        with db_service.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                result = cur.fetchone()
-        logger.info("✅ PostgreSQL: Connected successfully")
-    except Exception as e:
-        logger.error(f"❌ PostgreSQL: {e}")
     
     # Test Azure AI Search
     try:
