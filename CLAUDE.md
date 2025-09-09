@@ -27,20 +27,35 @@ The system uses **Contextual Conversation Chunking** which:
 - Detects topic shifts, Q&A pairs, and speaker changes
 - Preserves meeting context without information loss
 
+### Summary Generation
+- Processes **entire meeting** in batches of 35 entries
+- Generates comprehensive summaries with structured extraction:
+  - Main topics discussed
+  - Decisions made and action items
+  - Past events referenced and future actions
+  - Participant contributions
+
 ## Environment Setup
 
 ### Required Services
 - **Azure AI Search**: Vector storage and hybrid search (requires S1+ for semantic search)
-- **PostgreSQL**: Meeting metadata and relationships 
 - **OpenAI**: text-embedding-3-small (1536 dimensions) + GPT-4 for generation
+- **PostgreSQL**: Optional - only needed for database_exporter.py utility
 
 ### Environment Variables (.env)
 ```
+# Required
 OPENAI_API_KEY=your_openai_key
 AZURE_AI_SEARCH_KEY=your_search_key  
 AZURE_AI_SEARCH_ENDPOINT=https://your-service.search.windows.net
 AZURE_AI_SEARCH_INDEX=your_index_name
+
+# Optional - for database export utility only
 AZURE_POSTGRES_CONNECTION_STRING=Host=host;Database=db;Username=user;Password=pass
+
+# Optional - for enterprise Azure authentication
+AZURE_CLIENT_ID=your_client_id
+AZURE_CLIENT_SECRET=your_client_secret
 ```
 
 ### Windows WSL Environment
@@ -81,6 +96,14 @@ venv/Scripts/python.exe meeting_rag_processor.py --search "What did Sandeep demo
 venv/Scripts/python.exe meeting_rag_processor.py --search "action items" --meeting-id "uuid-here"
 ```
 
+### Database Export Utility
+```bash
+# Export PostgreSQL data to CSV files
+venv/Scripts/python.exe database_exporter.py
+
+# Exports data to exported_data/ directory
+```
+
 ## Database Schema
 
 ### PostgreSQL Tables
@@ -106,10 +129,15 @@ venv/Scripts/python.exe meeting_rag_processor.py --search "action items" --meeti
 3. **Generation**: LLM prompt with retrieved context + user question
 4. **Response**: Structured answer with source attribution
 
+### Performance Considerations
+- Summary processing: 35-entry batches to balance completeness and token limits
+- Search context: 12,000 token limit with intelligent truncation
+- Azure Search index auto-creation with schema validation
+
 ### Error Handling
 - PostgreSQL uses `gen_random_uuid()` (not uuid-ossp extension)
 - Empty chunk uploads are skipped to avoid Azure Search errors
-- Falls back to raw results if LLM unavailable
+- Token counting prevents LLM context overflow
 
 ## Testing Meeting Formats
 
@@ -119,3 +147,11 @@ Sample meeting formats in temp/ directory:
 - Test queries include speaker-specific, topic-based, and cross-meeting analysis
 
 The system handles meeting series detection via filename patterns and maintains relationships between related meetings automatically.
+
+## Troubleshooting
+
+### Common Issues
+- **Index creation fails**: Ensure Azure AI Search service is S1+ tier
+- **Token limit errors**: System automatically truncates context at 12,000 tokens
+- **Missing dependencies**: Install all requirements with `venv/Scripts/python.exe -m pip install -r requirements.txt`
+- **Authentication errors**: Verify OpenAI API key and Azure Search credentials in .env

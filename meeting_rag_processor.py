@@ -497,27 +497,73 @@ class ChunkingService:
         return self.encoder.decode(truncated_tokens)
     
     def _create_summary_chunk(self, entries: List[TranscriptEntry], meeting_id: str) -> Optional[MeetingChunk]:
-        """Create a summary chunk for the entire meeting"""
+        """Create a comprehensive summary chunk for the entire meeting"""
         if not entries or not llm:
             return None
         
         try:
-            # Get first 20 entries for summary
-            summary_entries = entries[:20]
-            content = self._format_segment_content(summary_entries)
+            total_entries = len(entries)
+            batch_size = 35
+            partial_summaries = []
             
-            # Generate summary using LLM
-            prompt = f"""Summarize this meeting transcript. Include:
-1. Main topics discussed
-2. Key decisions made
-3. Action items mentioned
-4. Participants involved
+            for i in range(0, total_entries, batch_size):
+                batch_entries = entries[i:min(i + batch_size, total_entries)]
+                batch_content = self._format_segment_content(batch_entries)
+                
+                batch_prompt = f"""Analyze this meeting transcript segment in detail. Provide a comprehensive analysis including:
 
-Transcript:
-{content[:2000]}"""
+1. **Detailed Discussion Flow**: Write a narrative paragraph describing what was discussed, maintaining the conversation flow and sequence of topics
+2. **Speaker Contributions**: Document what each speaker specifically said, proposed, committed to, or decided
+3. **Technical Details**: Capture all technical terms, tools, services, product names, and implementation details mentioned
+4. **Decision Context**: For any decisions made, include who proposed them, what alternatives were discussed, and any concerns raised
+5. **Important Statements**: Include verbatim key quotes, commitments, and important statements that shouldn't be paraphrased
+6. **Past Events**: Detailed references to previous meetings, projects, or events with context
+7. **Future Actions**: Specific tasks, deadlines, meetings, and commitments with who is responsible
+
+Write this as a detailed narrative that preserves the richness of the discussion and includes searchable keywords from the actual conversation.
+
+Transcript segment ({i+1}-{min(i+batch_size, total_entries)} of {total_entries} entries):
+{batch_content}"""
+                
+                batch_response = llm.invoke(batch_prompt)
+                partial_summary = batch_response.content if hasattr(batch_response, 'content') else str(batch_response)
+                partial_summaries.append(partial_summary)
             
-            summary_response = llm.invoke(prompt)
-            summary_text = summary_response.content if hasattr(summary_response, 'content') else str(summary_response)
+            combined_summary_prompt = f"""Create a comprehensive meeting summary from these detailed segment analyses. This summary should be rich enough to answer most questions without needing to access the original conversation chunks.
+
+{chr(10).join(f"Segment {i+1}: {summary}" for i, summary in enumerate(partial_summaries))}
+
+Create a two-part comprehensive summary:
+
+**PART 1 - STRUCTURED OVERVIEW:**
+- **Meeting Purpose**: What was the primary goal and context of this meeting
+- **Key Outcomes**: What was accomplished or decided
+- **Main Topics**: Primary areas of discussion with brief context
+- **Critical Decisions**: Who decided what, when, and why
+- **Action Items**: Specific tasks with owners and timelines
+- **Participants**: Who contributed what to the discussion
+
+**PART 2 - DETAILED NARRATIVE:**
+Write a comprehensive narrative that flows chronologically through the meeting, including:
+- Full conversation flow with detailed context and background
+- Who said what, including important verbatim quotes and commitments
+- Technical specifications, tool names, service details, and implementation discussions
+- The reasoning behind decisions, alternatives considered, and concerns raised
+- Detailed references to past events, projects, and previous meetings
+- Complete context for future actions, deadlines, and responsibilities
+- All project names, technical terms, and specific details that would be searched for
+
+Make this narrative detailed enough that someone could understand the full meeting context and answer specific questions about technical details, decisions, and commitments without needing the original transcript."""
+            
+            final_response = llm.invoke(combined_summary_prompt)
+            summary_text = final_response.content if hasattr(final_response, 'content') else str(final_response)
+            
+            metadata = {
+                'type': 'comprehensive_summary',
+                'segments_processed': len(partial_summaries),
+                'total_entries': total_entries,
+                'participants': list(set(entry.speaker for entry in entries))
+            }
             
             return MeetingChunk(
                 chunk_id=f"{meeting_id}_summary",
@@ -527,10 +573,10 @@ Transcript:
                 speakers=list(set(entry.speaker for entry in entries)),
                 start_timestamp=entries[0].timestamp,
                 end_timestamp=entries[-1].timestamp,
-                chunk_index=9999,  # High index for summary
+                chunk_index=9999,
                 token_count=len(self.encoder.encode(summary_text)),
                 has_context=False,
-                metadata={'type': 'ai_generated_summary'}
+                metadata=metadata
             )
         except Exception as e:
             logger.error(f"Error creating summary chunk: {e}")
@@ -857,26 +903,30 @@ class MeetingProcessor:
             if filter_meeting_id:
                 filter_expr = f"meeting_id eq '{filter_meeting_id}'"
             
-            # Step 1: Retrieve relevant chunks
             results = self.search_service.search(query, filter_expr)
             logger.info(f"Found {len(results)} results for query: {query}")
             
             if not results:
                 return "I couldn't find any relevant information in the meeting transcripts for your query."
             
-            # Step 2: Prepare context for LLM
             context_chunks = []
+            total_tokens = 0
+            max_context_tokens = 12000
+            
             for result in results:
-                context_chunks.append(f"Meeting: {result['meeting_id']}\n"
-                                    f"Speakers: {', '.join(result['speakers'])}\n"
-                                    f"Content: {result['content']}\n")
+                chunk_content = f"Meeting: {result['meeting_id']}\nSpeakers: {', '.join(result['speakers'])}\nContent: {result['content']}\n"
+                chunk_tokens = len(self.chunker.encoder.encode(chunk_content))
+                
+                if total_tokens + chunk_tokens > max_context_tokens:
+                    break
+                
+                context_chunks.append(chunk_content)
+                total_tokens += chunk_tokens
             
             context = "\n---\n".join(context_chunks)
             
-            # Step 3: Generate response using LLM
             if not llm:
-                logger.warning("LLM not available, returning raw results")
-                return self._format_raw_results(results)
+                raise ValueError("LLM not available for response generation")
             
             prompt = f"""Based on the following meeting transcripts, answer the user's question accurately and comprehensively.
 
@@ -897,26 +947,14 @@ Answer:"""
             response = llm.invoke(prompt)
             generated_answer = response.content if hasattr(response, 'content') else str(response)
             
-            # Add source information
             meeting_ids = list(set([r['meeting_id'] for r in results]))
-            source_info = f"\n\n**Sources**: Based on {len(results)} relevant excerpts from {len(meeting_ids)} meeting(s)."
+            source_info = f"\n\n**Sources**: Based on {len(context_chunks)} relevant excerpts from {len(meeting_ids)} meeting(s)."
             
             return generated_answer + source_info
             
         except Exception as e:
             logger.error(f"Error searching meetings: {e}")
             raise
-    
-    def _format_raw_results(self, results: List[Dict]) -> str:
-        """Fallback formatting when LLM is not available"""
-        formatted_results = []
-        for i, result in enumerate(results, 1):
-            formatted_results.append(f"{i}. Score: {result['score']:.3f}\n"
-                                   f"   Meeting: {result['meeting_id']}\n"
-                                   f"   Speakers: {', '.join(result['speakers'])}\n"
-                                   f"   Content: {result['content'][:200]}...\n")
-        
-        return f"Found {len(results)} results:\n\n" + "\n".join(formatted_results)
 
 def test_connections():
     """Test all service connections"""
