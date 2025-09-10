@@ -307,25 +307,40 @@ class TranscriptParser:
         """Extract meeting metadata from DOCX content"""
         metadata = {'participants': [], 'file_name': os.path.basename(filename)}
         
+        # Get first few lines which may contain metadata
         lines = content.split('\n')[:10]
         
-        for line in lines:
-            # Extract meeting title and ID
-            title_pattern = r'^(.*?)-(\d{8}_\d{6})-Meeting Recording'
-            if title_match := re.search(title_pattern, line):
+        # First line often contains title, date, time, and duration all together
+        # Format: "Meeting Title-YYYYMMDD_HHMMSS-Meeting Recording\nMonth DD, YYYY, H:MMPM\nXXm XXs"
+        if lines:
+            first_line = lines[0]
+            
+            # Extract meeting title and ID from first line or filename
+            title_pattern = r'(.*?)-(\d{8}_\d{6})-Meeting Recording'
+            if title_match := re.search(title_pattern, first_line):
                 metadata['meeting_title'] = title_match.group(1).strip()
                 metadata['series_id'] = title_match.group(1).strip()
-                
-            # Extract date and time
-            date_pattern = r'(\w+\s+\d{1,2},\s+\d{4}),\s+(\d{1,2}:\d{2}\s*[AP]M)'
-            if date_match := re.search(date_pattern, line):
-                metadata['meeting_date'] = date_match.group(1)
-                metadata['meeting_time'] = date_match.group(2)
-                
-            # Extract duration
-            duration_pattern = r'(\d+m\s+\d+s|\d+h\s+\d+m\s+\d+s)'
-            if duration_match := re.search(duration_pattern, line):
-                metadata['duration'] = duration_match.group(0)
+            elif title_match := re.search(title_pattern, filename):
+                metadata['meeting_title'] = title_match.group(1).strip()
+                metadata['series_id'] = title_match.group(1).strip()
+        
+        # Check all lines for date, time, and duration
+        full_text = '\n'.join(lines)
+        
+        # Extract date and time (might be on same or different lines)
+        date_pattern = r'(\w+\s+\d{1,2},\s+\d{4})'
+        time_pattern = r'(\d{1,2}:\d{2}\s*[AP]M)'
+        
+        if date_match := re.search(date_pattern, full_text):
+            metadata['meeting_date'] = date_match.group(1)
+        
+        if time_match := re.search(time_pattern, full_text):
+            metadata['meeting_time'] = time_match.group(1)
+        
+        # Extract duration
+        duration_pattern = r'(\d+h\s+\d+m\s+\d+s|\d+m\s+\d+s|\d+h\s+\d+m)'
+        if duration_match := re.search(duration_pattern, full_text):
+            metadata['duration'] = duration_match.group(1)
         
         return metadata
     
@@ -529,40 +544,101 @@ Transcript segment ({i+1}-{min(i+batch_size, total_entries)} of {total_entries} 
                 partial_summary = batch_response.content if hasattr(batch_response, 'content') else str(batch_response)
                 partial_summaries.append(partial_summary)
             
-            combined_summary_prompt = f"""Create a comprehensive meeting summary from these detailed segment analyses. This summary should be rich enough to answer most questions without needing to access the original conversation chunks.
+            combined_summary_prompt = f"""Analyze these meeting segments and create a comprehensive structured summary.
 
 {chr(10).join(f"Segment {i+1}: {summary}" for i, summary in enumerate(partial_summaries))}
 
-Create a two-part comprehensive summary:
+Generate the following structured fields:
 
-**PART 1 - STRUCTURED OVERVIEW:**
-- **Meeting Purpose**: What was the primary goal and context of this meeting
-- **Key Outcomes**: What was accomplished or decided
-- **Main Topics**: Primary areas of discussion with brief context
-- **Critical Decisions**: Who decided what, when, and why
-- **Action Items**: Specific tasks with owners and timelines
-- **Participants**: Who contributed what to the discussion
+MEETING_PURPOSE:
+Write 1-2 sentences describing why this meeting was held and its primary objective.
 
-**PART 2 - DETAILED NARRATIVE:**
-Write a comprehensive narrative that flows chronologically through the meeting, including:
-- Full conversation flow with detailed context and background
-- Who said what, including important verbatim quotes and commitments
-- Technical specifications, tool names, service details, and implementation discussions
-- The reasoning behind decisions, alternatives considered, and concerns raised
-- Detailed references to past events, projects, and previous meetings
-- Complete context for future actions, deadlines, and responsibilities
-- All project names, technical terms, and specific details that would be searched for
+KEY_OUTCOMES:
+List the main accomplishments and results from this meeting.
 
-Make this narrative detailed enough that someone could understand the full meeting context and answer specific questions about technical details, decisions, and commitments without needing the original transcript."""
+MAIN_TOPICS:
+List the primary discussion topics with brief descriptions of what was covered in each.
+
+DECISIONS_MADE:
+List each decision with who made it and the reasoning behind it.
+
+ACTION_ITEMS:
+List specific tasks with assigned owners and deadlines.
+
+PAST_EVENTS:
+List references to previous meetings, projects, or events that were discussed.
+
+FUTURE_ACTIONS:
+List upcoming meetings, planned activities, and future commitments.
+
+DETAILED_NARRATIVE:
+Write a comprehensive narrative that captures the full meeting flow. Include who said what, technical details discussed, implementation specifics, tool and service names, project references, verbatim important quotes, the context behind decisions, concerns raised, alternatives considered, and all searchable technical terms and project details. This should be detailed enough to answer any question about the meeting without accessing the original transcript.
+
+Format your response with clear section headers exactly as shown above."""
             
             final_response = llm.invoke(combined_summary_prompt)
-            summary_text = final_response.content if hasattr(final_response, 'content') else str(final_response)
+            response_text = final_response.content if hasattr(final_response, 'content') else str(final_response)
+            
+            # Extract structured sections using flexible regex pattern
+            # This pattern handles multiple LLM response formats:
+            # - Markdown headers: ### SECTION_NAME or ## SECTION_NAME
+            # - Bold markdown: **SECTION_NAME:** or **SECTION_NAME**
+            # - Plain text: SECTION_NAME: or SECTION_NAME
+            # - With or without colons, with or without spaces
+            sections = {}
+            
+            # Define expected sections and their normalized keys
+            section_mappings = {
+                'MEETING_PURPOSE': 'meeting_purpose',
+                'KEY_OUTCOMES': 'key_outcomes',
+                'MAIN_TOPICS': 'main_topics',
+                'DECISIONS_MADE': 'decisions_made',
+                'ACTION_ITEMS': 'action_items',
+                'PAST_EVENTS': 'past_events',
+                'FUTURE_ACTIONS': 'future_actions',
+                'DETAILED_NARRATIVE': 'detailed_narrative'
+            }
+            
+            # Regex pattern to match section headers and content
+            # Group 1: Optional markdown formatting (###, ##, #, **)
+            # Group 2: Section name (MEETING_PURPOSE, KEY_OUTCOMES, etc.)
+            # Group 3: Optional colon and formatting
+            # Group 4: Content until next section or end of text
+            pattern = r'(?:^|\n)\s*(?:#{1,3}\s*|\*{2}\s*)?([A-Z_]+)(?:\s*:?\s*\*{2}|\s*:|\s*$)\s*\n?(.*?)(?=\n\s*(?:#{1,3}\s*|\*{2}\s*)?[A-Z_]+(?:\s*:?\s*\*{2}|\s*:|\s*$)|\Z)'
+            
+            # Find all matches in the response text
+            matches = re.findall(pattern, response_text, re.MULTILINE | re.DOTALL)
+            
+            # Process each match and store in sections dictionary
+            for section_header, content in matches:
+                section_header = section_header.strip()
+                
+                # Map the section header to normalized key
+                if section_header in section_mappings:
+                    normalized_key = section_mappings[section_header]
+                    # Clean up the content: remove leading/trailing whitespace and empty lines
+                    cleaned_content = '\n'.join(
+                        line for line in content.strip().split('\n')
+                        if line.strip()
+                    )
+                    sections[normalized_key] = cleaned_content
+            
+            # Log extraction results
+            if sections:
+                logger.info(f"Successfully extracted {len(sections)} structured fields from summary")
+                logger.debug(f"Extracted sections: {list(sections.keys())}")
+            else:
+                logger.warning("No structured sections found in LLM response")
+                logger.debug(f"LLM response first 500 chars: {response_text[:500]}")
+            
+            summary_text = response_text
             
             metadata = {
                 'type': 'comprehensive_summary',
                 'segments_processed': len(partial_summaries),
                 'total_entries': total_entries,
-                'participants': list(set(entry.speaker for entry in entries))
+                'participants': list(set(entry.speaker for entry in entries)),
+                'structured_fields': sections
             }
             
             return MeetingChunk(
@@ -668,6 +744,16 @@ class SearchService:
             SimpleField(name="duration", type=SearchFieldDataType.String),
             SimpleField(name="meeting_time", type=SearchFieldDataType.String),
             SimpleField(name="metadata_json", type=SearchFieldDataType.String),
+            
+            # Structured Summary Fields
+            SearchableField(name="meeting_purpose", type=SearchFieldDataType.String),
+            SearchableField(name="key_outcomes", type=SearchFieldDataType.String),
+            SearchableField(name="main_topics", type=SearchFieldDataType.String),
+            SearchableField(name="decisions_made", type=SearchFieldDataType.String),
+            SearchableField(name="action_items", type=SearchFieldDataType.String),
+            SearchableField(name="past_events", type=SearchFieldDataType.String),
+            SearchableField(name="future_actions", type=SearchFieldDataType.String),
+            SearchableField(name="detailed_narrative", type=SearchFieldDataType.String),
         ]
         
         # Configure vector search
@@ -780,6 +866,18 @@ class SearchService:
                     "created_at": datetime.now().isoformat() + 'Z',
                     "status": "completed"
                 }
+                
+                if chunk.chunk_type == "summary" and chunk.metadata.get('structured_fields'):
+                    fields = chunk.metadata['structured_fields']
+                    doc["meeting_purpose"] = fields.get('meeting_purpose', '')
+                    doc["key_outcomes"] = fields.get('key_outcomes', '')
+                    doc["main_topics"] = fields.get('main_topics', '')
+                    doc["decisions_made"] = fields.get('decisions_made', '')
+                    doc["action_items"] = fields.get('action_items', '')
+                    doc["past_events"] = fields.get('past_events', '')
+                    doc["future_actions"] = fields.get('future_actions', '')
+                    doc["detailed_narrative"] = fields.get('detailed_narrative', '')
+                
                 documents.append(doc)
         
         try:
@@ -791,19 +889,16 @@ class SearchService:
             raise
 
     
-    def search(self, query: str, filter_expr: str = None, top: int = 5, document_types: List[str] = None) -> List[Dict]:
-        """Perform hybrid search"""
+    def search(self, query: str, filter_expr: str = None, top: int = 5, document_types: List[str] = None, select_fields: List[str] = None) -> List[Dict]:
+        """Perform hybrid search with optional field projection"""
         if not embedding_model:
             raise ValueError("Embedding model not initialized")
         
         try:
-            # Generate query embedding
             query_embedding = embedding_model.embed_query(query)
             
-            # Build filter expression
             filters = []
             
-            # Filter by document types (default to chunks only)
             if document_types is None:
                 document_types = ["chunk"]
             
@@ -814,42 +909,67 @@ class SearchService:
                     type_filters = [f"document_type eq '{dt}'" for dt in document_types]
                     filters.append(f"({' or '.join(type_filters)})")
             
-            # Add custom filter if provided
             if filter_expr:
                 filters.append(filter_expr)
             
-            # Combine filters
             final_filter = " and ".join(filters) if filters else None
             
-            # Import VectorizedQuery for proper vector search
             from azure.search.documents.models import VectorizedQuery
             
-            # Perform search
-            results = self.search_client.search(
-                search_text=query,
-                vector_queries=[VectorizedQuery(
+            search_params = {
+                "search_text": query,
+                "vector_queries": [VectorizedQuery(
                     vector=query_embedding,
                     k_nearest_neighbors=top,
                     fields="content_vector"
                 )],
-                filter=final_filter,
-                top=top,
-                include_total_count=True
-            )
+                "filter": final_filter,
+                "top": top,
+                "include_total_count": True
+            }
+            
+            if select_fields:
+                search_params["select"] = select_fields
+            
+            results = self.search_client.search(**search_params)
             
             search_results = []
             for result in results:
-                search_results.append({
-                    "id": result["id"],
-                    "content": result["content"],
-                    "meeting_id": result["meeting_id"],
+                result_dict = {
+                    "id": result.get("id", ""),
+                    "meeting_id": result.get("meeting_id", ""),
                     "chunk_type": result.get("chunk_type", ""),
                     "speakers": result.get("speakers", []),
                     "meeting_title": result.get("meeting_title", ""),
                     "series_id": result.get("series_id", ""),
                     "document_type": result.get("document_type", ""),
-                    "score": result["@search.score"]
-                })
+                    "meeting_date": result.get("meeting_date", ""),
+                    "meeting_time": result.get("meeting_time", ""),
+                    "duration": result.get("duration", ""),
+                    "metadata_json": result.get("metadata_json", ""),
+                    "score": result.get("@search.score", 0)
+                }
+                
+                if "content" in result:
+                    result_dict["content"] = result["content"]
+                if "meeting_purpose" in result:
+                    result_dict["meeting_purpose"] = result["meeting_purpose"]
+                if "key_outcomes" in result:
+                    result_dict["key_outcomes"] = result["key_outcomes"]
+                if "main_topics" in result:
+                    result_dict["main_topics"] = result["main_topics"]
+                if "decisions_made" in result:
+                    result_dict["decisions_made"] = result["decisions_made"]
+                if "action_items" in result:
+                    result_dict["action_items"] = result["action_items"]
+                if "past_events" in result:
+                    result_dict["past_events"] = result["past_events"]
+                if "future_actions" in result:
+                    result_dict["future_actions"] = result["future_actions"]
+                if "detailed_narrative" in result:
+                    result_dict["detailed_narrative"] = result["detailed_narrative"]
+                
+                search_results.append(result_dict)
             
             return search_results
         except Exception as e:
@@ -903,7 +1023,32 @@ class MeetingProcessor:
             if filter_meeting_id:
                 filter_expr = f"meeting_id eq '{filter_meeting_id}'"
             
-            results = self.search_service.search(query, filter_expr)
+            query_lower = query.lower()
+            select_fields = None
+            use_summary_only = False
+            
+            if any(term in query_lower for term in ['action item', 'task', 'todo', 'assigned']):
+                select_fields = ['id', 'meeting_id', 'action_items', 'future_actions', 'speakers', 'meeting_title']
+                use_summary_only = True
+            elif any(term in query_lower for term in ['decision', 'decided', 'agreed']):
+                select_fields = ['id', 'meeting_id', 'decisions_made', 'speakers', 'meeting_title']
+                use_summary_only = True
+            elif any(term in query_lower for term in ['topic', 'discussed', 'agenda']):
+                select_fields = ['id', 'meeting_id', 'main_topics', 'meeting_purpose', 'speakers', 'meeting_title']
+                use_summary_only = True
+            elif any(term in query_lower for term in ['outcome', 'result', 'accomplished']):
+                select_fields = ['id', 'meeting_id', 'key_outcomes', 'meeting_purpose', 'speakers', 'meeting_title']
+                use_summary_only = True
+            elif any(term in query_lower for term in ['previous', 'last meeting', 'past']):
+                select_fields = ['id', 'meeting_id', 'past_events', 'speakers', 'meeting_title']
+                use_summary_only = True
+            
+            search_filter = filter_expr
+            if use_summary_only:
+                summary_filter = "chunk_type eq 'summary'"
+                search_filter = f"{filter_expr} and {summary_filter}" if filter_expr else summary_filter
+            
+            results = self.search_service.search(query, search_filter, select_fields=select_fields)
             logger.info(f"Found {len(results)} results for query: {query}")
             
             if not results:
@@ -914,7 +1059,31 @@ class MeetingProcessor:
             max_context_tokens = 12000
             
             for result in results:
-                chunk_content = f"Meeting: {result['meeting_id']}\nSpeakers: {', '.join(result['speakers'])}\nContent: {result['content']}\n"
+                chunk_parts = [f"Meeting: {result.get('meeting_title', result['meeting_id'])}"]
+                
+                if 'speakers' in result and result['speakers']:
+                    chunk_parts.append(f"Speakers: {', '.join(result['speakers'])}")
+                
+                if 'action_items' in result and result['action_items']:
+                    chunk_parts.append(f"Action Items:\n{result['action_items']}")
+                if 'decisions_made' in result and result['decisions_made']:
+                    chunk_parts.append(f"Decisions:\n{result['decisions_made']}")
+                if 'main_topics' in result and result['main_topics']:
+                    chunk_parts.append(f"Topics:\n{result['main_topics']}")
+                if 'key_outcomes' in result and result['key_outcomes']:
+                    chunk_parts.append(f"Outcomes:\n{result['key_outcomes']}")
+                if 'past_events' in result and result['past_events']:
+                    chunk_parts.append(f"Past Events:\n{result['past_events']}")
+                if 'future_actions' in result and result['future_actions']:
+                    chunk_parts.append(f"Future Actions:\n{result['future_actions']}")
+                if 'meeting_purpose' in result and result['meeting_purpose']:
+                    chunk_parts.append(f"Purpose: {result['meeting_purpose']}")
+                if 'detailed_narrative' in result and result['detailed_narrative']:
+                    chunk_parts.append(f"Details:\n{result['detailed_narrative']}")
+                if 'content' in result and result['content']:
+                    chunk_parts.append(f"Content:\n{result['content']}")
+                
+                chunk_content = '\n'.join(chunk_parts) + '\n'
                 chunk_tokens = len(self.chunker.encoder.encode(chunk_content))
                 
                 if total_tokens + chunk_tokens > max_context_tokens:
