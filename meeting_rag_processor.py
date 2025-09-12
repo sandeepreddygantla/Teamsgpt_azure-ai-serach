@@ -71,38 +71,32 @@ AVAILABLE_MODELS = {
         "temperature": 0,
         "max_tokens": 16000,
         "description": "Enhanced GPT-4 model for balanced performance"
+    },
+    "query-analyzer": {
+        "name": "Query Analyzer",
+        "model": "gpt-4o-mini",
+        "temperature": 0,
+        "max_tokens": 2000,
+        "description": "Query analysis for search optimization"
     }
 }
 
 def get_access_token():
-    """Get access token - keeping your existing function structure"""
+    """Get access token - dummy function for LLM initialization pattern"""
     try:
         azure_client_id = os.getenv("AZURE_CLIENT_ID")
         azure_client_secret = os.getenv("AZURE_CLIENT_SECRET")
         
         if azure_client_id and azure_client_secret:
-            logger.info("Azure environment detected - getting Azure AD token")
-            auth = "https://api.uhg.com/oauth2/token"
-            scope = "https://api.uhg.com/.default"
-            grant_type = "client_credentials"
-            
-            with httpx.Client() as client:
-                body = {
-                    "grant_type": grant_type,
-                    "scope": scope,
-                    "client_id": azure_client_id,
-                    "client_secret": azure_client_secret
-                }
-                headers = {"Content-Type": "application/x-www-form-urlencoded"}
-                response = client.post(auth, headers=headers, data=body, timeout=60)
-                response.raise_for_status()
-                return response.json()["access_token"]
+            logger.info("Azure environment detected - but using dummy token (no API call)")
+            # Return dummy token instead of making API call
+            return "dummy_azure_token"
         else:
             logger.info("OpenAI environment detected - using API key authentication")
             return None
             
     except Exception as e:
-        logger.error(f"Error getting access token: {e}")
+        logger.error(f"Error in access token function: {e}")
         return None
 
 def get_llm(access_token: str = None, model_name: str = None):
@@ -143,15 +137,38 @@ def get_embedding_model(access_token: str = None):
         logger.error(f"Error creating embedding model: {e}")
         return None
 
+def get_query_analyzer_llm(access_token: str = None):
+    """Get query analyzer LLM client"""
+    try:
+        current_api_key = os.getenv("OPENAI_API_KEY")
+        if not current_api_key:
+            logger.warning("OPENAI_API_KEY environment variable not set")
+            return None
+        
+        model_config = AVAILABLE_MODELS.get("query-analyzer")
+        
+        return ChatOpenAI(
+            model=model_config["model"],
+            openai_api_key=current_api_key,
+            temperature=model_config["temperature"],
+            max_tokens=model_config["max_tokens"],
+            request_timeout=60
+        )
+    except Exception as e:
+        logger.error(f"Error creating query analyzer LLM: {e}")
+        return None
+
 # Initialize global variables using your existing structure
 try:
     access_token = get_access_token()
     embedding_model = get_embedding_model(access_token)
     llm = get_llm(access_token)
+    query_analyzer_llm = get_query_analyzer_llm(access_token)
 except Exception as e:
     logger.error(f"Error initializing models: {e}")
     embedding_model = None
     llm = None
+    query_analyzer_llm = None
 
 @dataclass
 class TranscriptEntry:
@@ -474,10 +491,6 @@ class ChunkingService:
             current_entry = all_entries[current_index]
             next_entry = all_entries[current_index + 1]
             
-            # Topic shift detection
-            if self._detect_topic_shift(current_entry, next_entry):
-                return True
-            
             # Long pause detection (more than 30 seconds)
             if next_entry.timestamp_seconds - current_entry.timestamp_seconds > 30:
                 return True
@@ -485,15 +498,6 @@ class ChunkingService:
         # Default: chunk if we're at target size
         return token_count >= self.target_tokens
     
-    def _detect_topic_shift(self, current_entry: TranscriptEntry, next_entry: TranscriptEntry) -> bool:
-        """Detect potential topic shifts"""
-        topic_shift_phrases = [
-            "moving on", "next topic", "let's discuss", "switching to",
-            "another thing", "also", "by the way", "speaking of"
-        ]
-        
-        next_text_lower = next_entry.text.lower()
-        return any(phrase in next_text_lower for phrase in topic_shift_phrases)
     
     def _format_segment_content(self, segment: List[TranscriptEntry]) -> str:
         """Format segment entries into readable content"""
@@ -512,69 +516,65 @@ class ChunkingService:
         return self.encoder.decode(truncated_tokens)
     
     def _create_summary_chunk(self, entries: List[TranscriptEntry], meeting_id: str) -> Optional[MeetingChunk]:
-        """Create a comprehensive summary chunk for the entire meeting"""
+        """Create a comprehensive summary chunk using 60k token context"""
         if not entries or not llm:
             return None
         
         try:
+            # Use larger batches with 60k context
             total_entries = len(entries)
-            batch_size = 35
+            batch_size = 100  # Increased from 35
             partial_summaries = []
             
             for i in range(0, total_entries, batch_size):
                 batch_entries = entries[i:min(i + batch_size, total_entries)]
                 batch_content = self._format_segment_content(batch_entries)
                 
-                batch_prompt = f"""Analyze this meeting transcript segment in detail. Provide a comprehensive analysis including:
+                batch_prompt = f"""Analyze this meeting segment and extract key information:
 
-1. **Detailed Discussion Flow**: Write a narrative paragraph describing what was discussed, maintaining the conversation flow and sequence of topics
-2. **Speaker Contributions**: Document what each speaker specifically said, proposed, committed to, or decided
-3. **Technical Details**: Capture all technical terms, tools, services, product names, and implementation details mentioned
-4. **Decision Context**: For any decisions made, include who proposed them, what alternatives were discussed, and any concerns raised
-5. **Important Statements**: Include verbatim key quotes, commitments, and important statements that shouldn't be paraphrased
-6. **Past Events**: Detailed references to previous meetings, projects, or events with context
-7. **Future Actions**: Specific tasks, deadlines, meetings, and commitments with who is responsible
+{batch_content}
 
-Write this as a detailed narrative that preserves the richness of the discussion and includes searchable keywords from the actual conversation.
-
-Transcript segment ({i+1}-{min(i+batch_size, total_entries)} of {total_entries} entries):
-{batch_content}"""
+Extract:
+1. Main discussion points and topics
+2. Decisions made with context
+3. Action items with owners
+4. Important quotes and statements
+5. Technical details mentioned
+6. References to other meetings or projects"""
                 
                 batch_response = llm.invoke(batch_prompt)
-                partial_summary = batch_response.content if hasattr(batch_response, 'content') else str(batch_response)
-                partial_summaries.append(partial_summary)
+                partial_summaries.append(batch_response.content if hasattr(batch_response, 'content') else str(batch_response))
             
-            combined_summary_prompt = f"""Analyze these meeting segments and create a comprehensive structured summary.
+            # Final comprehensive summary with all new fields
+            combined_summary_prompt = f"""Create a comprehensive meeting summary from these segments:
 
 {chr(10).join(f"Segment {i+1}: {summary}" for i, summary in enumerate(partial_summaries))}
 
-Generate the following structured fields:
+Generate these specific fields:
 
 MEETING_PURPOSE:
-Write 1-2 sentences describing why this meeting was held and its primary objective.
+Brief description of meeting objective and why it was held.
 
 KEY_OUTCOMES:
-List the main accomplishments and results from this meeting.
+Main accomplishments and results achieved.
 
 MAIN_TOPICS:
-List the primary discussion topics with brief descriptions of what was covered in each.
+Primary discussion areas with context.
 
 DECISIONS_MADE:
-List each decision with who made it and the reasoning behind it.
+Specific decisions with who made them and reasoning.
 
 ACTION_ITEMS:
-List specific tasks with assigned owners and deadlines.
+Tasks with assigned owners and deadlines.
 
 PAST_EVENTS:
-List references to previous meetings, projects, or events that were discussed.
+References to previous meetings, projects, or events.
 
 FUTURE_ACTIONS:
-List upcoming meetings, planned activities, and future commitments.
+Upcoming meetings, planned activities, and commitments.
 
 DETAILED_NARRATIVE:
-Write a comprehensive narrative that captures the full meeting flow. Include who said what, technical details discussed, implementation specifics, tool and service names, project references, verbatim important quotes, the context behind decisions, concerns raised, alternatives considered, and all searchable technical terms and project details. This should be detailed enough to answer any question about the meeting without accessing the original transcript.
-
-Format your response with clear section headers exactly as shown above."""
+Comprehensive flow capturing who said what, technical specifics, decision context, and all searchable details."""
             
             final_response = llm.invoke(combined_summary_prompt)
             response_text = final_response.content if hasattr(final_response, 'content') else str(final_response)
@@ -1023,25 +1023,29 @@ class MeetingProcessor:
             if filter_meeting_id:
                 filter_expr = f"meeting_id eq '{filter_meeting_id}'"
             
-            query_lower = query.lower()
-            select_fields = None
-            use_summary_only = False
-            
-            if any(term in query_lower for term in ['action item', 'task', 'todo', 'assigned']):
-                select_fields = ['id', 'meeting_id', 'action_items', 'future_actions', 'speakers', 'meeting_title']
-                use_summary_only = True
-            elif any(term in query_lower for term in ['decision', 'decided', 'agreed']):
-                select_fields = ['id', 'meeting_id', 'decisions_made', 'speakers', 'meeting_title']
-                use_summary_only = True
-            elif any(term in query_lower for term in ['topic', 'discussed', 'agenda']):
-                select_fields = ['id', 'meeting_id', 'main_topics', 'meeting_purpose', 'speakers', 'meeting_title']
-                use_summary_only = True
-            elif any(term in query_lower for term in ['outcome', 'result', 'accomplished']):
-                select_fields = ['id', 'meeting_id', 'key_outcomes', 'meeting_purpose', 'speakers', 'meeting_title']
-                use_summary_only = True
-            elif any(term in query_lower for term in ['previous', 'last meeting', 'past']):
-                select_fields = ['id', 'meeting_id', 'past_events', 'speakers', 'meeting_title']
-                use_summary_only = True
+            # Analyze query intent using LLM
+            if query_analyzer_llm:
+                query_analysis = self._analyze_query_with_llm(query)
+                
+                # Build filters from analysis
+                if query_analysis.get('date_filter'):
+                    date_filter = query_analysis['date_filter']
+                    filter_expr = f"{filter_expr} and {date_filter}" if filter_expr else date_filter
+                
+                if query_analysis.get('speaker_filter'):
+                    speaker_filter = query_analysis['speaker_filter']
+                    filter_expr = f"{filter_expr} and {speaker_filter}" if filter_expr else speaker_filter
+                
+                if query_analysis.get('content_filter'):
+                    content_filter = query_analysis['content_filter']
+                    filter_expr = f"{filter_expr} and {content_filter}" if filter_expr else content_filter
+                
+                select_fields = query_analysis.get('optimal_fields')
+                use_summary_only = query_analysis.get('use_summary_chunks', False)
+            else:
+                # Basic strategy when analyzer unavailable
+                select_fields = None
+                use_summary_only = False
             
             search_filter = filter_expr
             if use_summary_only:
@@ -1052,36 +1056,28 @@ class MeetingProcessor:
             logger.info(f"Found {len(results)} results for query: {query}")
             
             if not results:
-                return "I couldn't find any relevant information in the meeting transcripts for your query."
+                return self._generate_no_results_response(query, query_analysis)
             
+            # Build context optimized for 60k tokens
             context_chunks = []
             total_tokens = 0
-            max_context_tokens = 12000
+            max_context_tokens = 50000
             
             for result in results:
                 chunk_parts = [f"Meeting: {result.get('meeting_title', result['meeting_id'])}"]
                 
+                if result.get('meeting_date'):
+                    chunk_parts.append(f"Date: {result['meeting_date'][:10]}")
+                
                 if 'speakers' in result and result['speakers']:
                     chunk_parts.append(f"Speakers: {', '.join(result['speakers'])}")
                 
-                if 'action_items' in result and result['action_items']:
-                    chunk_parts.append(f"Action Items:\n{result['action_items']}")
-                if 'decisions_made' in result and result['decisions_made']:
-                    chunk_parts.append(f"Decisions:\n{result['decisions_made']}")
-                if 'main_topics' in result and result['main_topics']:
-                    chunk_parts.append(f"Topics:\n{result['main_topics']}")
-                if 'key_outcomes' in result and result['key_outcomes']:
-                    chunk_parts.append(f"Outcomes:\n{result['key_outcomes']}")
-                if 'past_events' in result and result['past_events']:
-                    chunk_parts.append(f"Past Events:\n{result['past_events']}")
-                if 'future_actions' in result and result['future_actions']:
-                    chunk_parts.append(f"Future Actions:\n{result['future_actions']}")
-                if 'meeting_purpose' in result and result['meeting_purpose']:
-                    chunk_parts.append(f"Purpose: {result['meeting_purpose']}")
-                if 'detailed_narrative' in result and result['detailed_narrative']:
-                    chunk_parts.append(f"Details:\n{result['detailed_narrative']}")
-                if 'content' in result and result['content']:
-                    chunk_parts.append(f"Content:\n{result['content']}")
+                # Add relevant content based on available fields
+                for field in ['action_items', 'decisions_made', 'main_topics', 'key_outcomes', 
+                             'past_events', 'future_actions', 'meeting_purpose', 'detailed_narrative', 'content']:
+                    if result.get(field):
+                        field_name = field.replace('_', ' ').title()
+                        chunk_parts.append(f"{field_name}: {result[field]}")
                 
                 chunk_content = '\n'.join(chunk_parts) + '\n'
                 chunk_tokens = len(self.chunker.encoder.encode(chunk_content))
@@ -1124,6 +1120,176 @@ Answer:"""
         except Exception as e:
             logger.error(f"Error searching meetings: {e}")
             raise
+    
+    def _analyze_query_with_llm(self, query: str) -> dict:
+        """Analyze query using LLM to determine search strategy"""
+        try:
+            logger.info(f"Analyzing query: \"{query}\"")
+            
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            current_date = now.strftime("%Y-%m-%d")
+            
+            # Calculate proper calendar weeks (Sunday to Saturday)
+            days_since_sunday = now.weekday() + 1 if now.weekday() != 6 else 0  # Sunday = 0 in weekday()
+            current_week_start = (now - timedelta(days=days_since_sunday)).strftime("%Y-%m-%d")
+            current_week_end = (now - timedelta(days=days_since_sunday) + timedelta(days=6)).strftime("%Y-%m-%d")
+            last_week_start = (now - timedelta(days=days_since_sunday + 7)).strftime("%Y-%m-%d")
+            last_week_end = (now - timedelta(days=days_since_sunday + 1)).strftime("%Y-%m-%d")
+            
+            # Calculate proper calendar months
+            import calendar
+            current_month_start = now.replace(day=1).strftime("%Y-%m-%d")
+            last_day_current_month = calendar.monthrange(now.year, now.month)[1]
+            current_month_end = now.replace(day=last_day_current_month).strftime("%Y-%m-%d")
+            
+            if now.month == 1:
+                last_month = now.replace(year=now.year-1, month=12, day=1)
+            else:
+                last_month = now.replace(month=now.month-1, day=1)
+            last_day_last_month = calendar.monthrange(last_month.year, last_month.month)[1]
+            last_month_start = last_month.strftime("%Y-%m-%d")
+            last_month_end = last_month.replace(day=last_day_last_month).strftime("%Y-%m-%d")
+            
+            analysis_prompt = f"""Analyze this meeting search query and return JSON with search strategy:
+
+CURRENT DATE: {current_date}
+
+CALENDAR CONTEXT:
+WEEKS (Sunday to Saturday):
+- Current week: {current_week_start} to {current_week_end}
+- Last week: {last_week_start} to {last_week_end}
+
+MONTHS (1st to last day):
+- Current month: {current_month_start} to {current_month_end}
+- Last month: {last_month_start} to {last_month_end}
+
+Use these exact date ranges for relative date queries like "this week", "last month", "current month", etc.
+
+Query: "{query}"
+
+Available fields: meeting_date, speakers (collection), participants (collection), series_id, meeting_title, content, meeting_purpose, key_outcomes, main_topics, decisions_made, action_items, past_events, future_actions, detailed_narrative
+
+IMPORTANT - Azure AI Search Filter Syntax:
+
+For Speaker Names (fuzzy matching):
+- search.ismatch('{{name}}*', 'speakers')
+- Examples: search.ismatch('Michael*', 'speakers'), search.ismatch('Sandeep*', 'speakers')
+
+For Dates (DateTimeOffset comparison):
+- meeting_date ge 2025-07-01T00:00:00Z (after July 1st 2025)
+- meeting_date eq 2025-07-14T00:00:00Z (exactly July 14th 2025)  
+- meeting_date ge 2025-07-01T00:00:00Z and meeting_date le 2025-07-07T23:59:59Z (date range)
+- Examples:
+  - "July 14" → meeting_date eq 2025-07-14T00:00:00Z
+  - "last week" → meeting_date ge {last_week_start}T00:00:00Z and meeting_date le {last_week_end}T23:59:59Z
+  - "current week" → meeting_date ge {current_week_start}T00:00:00Z and meeting_date le {current_week_end}T23:59:59Z
+  - "last month" → meeting_date ge {last_month_start}T00:00:00Z and meeting_date le {last_month_end}T23:59:59Z
+  - "current month" → meeting_date ge {current_month_start}T00:00:00Z and meeting_date le {current_month_end}T23:59:59Z
+  - "December 2025" → search.ismatch('*2025-12*', 'meeting_date')
+
+Return JSON:
+{{
+    "intent": "summary|decisions|action_items|speaker_analysis|technical|general",
+    "date_filter": "meeting_date filter expression or empty string",
+    "speaker_filter": "search.ismatch('name*', 'speakers') format or empty string", 
+    "content_filter": "series_id or meeting_title filter or empty string",
+    "optimal_fields": ["list of best fields for this query"],
+    "use_summary_chunks": true/false
+}}
+
+Return only JSON, no explanation."""
+
+            response = query_analyzer_llm.invoke(analysis_prompt)
+            raw_response = response.content.strip()
+            logger.info(f"Query Analyzer Response: {raw_response}")
+            
+            # Clean markdown code blocks if present
+            clean_response = raw_response
+            if clean_response.startswith('```'):
+                parts = clean_response.split('```')
+                if len(parts) >= 3:
+                    clean_response = parts[1]
+                    if clean_response.startswith('json'):
+                        clean_response = clean_response[4:]
+                    clean_response = clean_response.strip()
+            
+            import json
+            parsed_strategy = json.loads(clean_response)
+            
+            # Log key components of the strategy
+            logger.info(f"Detected intent: {parsed_strategy.get('intent', 'unknown')}")
+            if parsed_strategy.get('date_filter'):
+                logger.info(f"Generated date filter: {parsed_strategy['date_filter']}")
+            if parsed_strategy.get('speaker_filter'):
+                logger.info(f"Generated speaker filter: {parsed_strategy['speaker_filter']}")
+            if parsed_strategy.get('content_filter'):
+                logger.info(f"Generated content filter: {parsed_strategy['content_filter']}")
+            if parsed_strategy.get('optimal_fields'):
+                logger.info(f"Selected fields: {parsed_strategy['optimal_fields']}")
+            logger.info(f"Use summary chunks: {parsed_strategy.get('use_summary_chunks', False)}")
+            
+            return parsed_strategy
+        except Exception as e:
+            logger.warning(f"Query analysis failed: {e}")
+            return {}
+    
+    def _generate_no_results_response(self, query: str, query_analysis: dict) -> str:
+        """Generate contextual response when no results are found"""
+        intent = query_analysis.get('intent', 'general')
+        speaker_filter = query_analysis.get('speaker_filter', '')
+        date_filter = query_analysis.get('date_filter', '')
+        
+        # Extract speaker name from filter if present
+        speaker_name = None
+        if speaker_filter and 'search.ismatch' in speaker_filter:
+            import re
+            match = re.search(r"search\.ismatch\('([^*']+)\*?'", speaker_filter)
+            if match:
+                speaker_name = match.group(1)
+        
+        # Extract date info from filter if present
+        date_info = None
+        if date_filter:
+            date_info = "the specified date"
+        
+        # Generate specific responses based on intent and filters
+        if intent == 'speaker_analysis' and speaker_name:
+            # Get list of actual speakers to provide helpful feedback
+            try:
+                all_results = self.search_service.search('*', 'document_type eq \'chunk\'', select_fields=['speakers'], top=50)
+                all_speakers = set()
+                for result in all_results:
+                    if result.get('speakers'):
+                        all_speakers.update(result['speakers'])
+                
+                if all_speakers:
+                    speaker_list = sorted(list(all_speakers))[:5]  # Show first 5
+                    speakers_text = ', '.join(speaker_list)
+                    if len(all_speakers) > 5:
+                        speakers_text += f" and {len(all_speakers)-5} others"
+                    
+                    return f"I couldn't find any speaker named '{speaker_name}' in the meeting transcripts.\n\nActual participants in the meetings include: {speakers_text}.\n\nTry asking about one of these participants instead."
+                else:
+                    return f"I couldn't find any speaker named '{speaker_name}' in the meeting transcripts."
+            except:
+                return f"I couldn't find any speaker named '{speaker_name}' in the meeting transcripts."
+        
+        elif intent == 'summary' and date_info:
+            return f"No meetings were found for {date_info}. Please check the date or try a broader date range."
+        
+        elif intent == 'decisions':
+            return "No specific decisions were found in the meeting transcripts for your query. The meetings may not have reached formal decisions on this topic."
+        
+        elif intent == 'action_items':
+            return "No action items were found matching your query. The meetings may not have generated specific action items on this topic."
+        
+        elif date_info:
+            return f"No meetings were found for {date_info}. Please verify the date or try searching for a different time period."
+        
+        else:
+            # Generic but more helpful response
+            return "I couldn't find any relevant information in the meeting transcripts for your query. Please try:\n• Using different keywords\n• Asking about specific participants or topics\n• Checking if the information might be in a different meeting"
 
 def test_connections():
     """Test all service connections"""

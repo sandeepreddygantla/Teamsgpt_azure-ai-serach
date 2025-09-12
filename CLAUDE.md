@@ -24,11 +24,18 @@ Meeting Files → TranscriptParser → ChunkingService → Azure AI Search → H
 The system uses **Contextual Conversation Chunking** which:
 - Creates 500-token target chunks with natural conversation boundaries
 - Maintains 1-2 speaker turns of context overlap
-- Detects topic shifts, Q&A pairs, and speaker changes
+- Uses pause-based natural boundaries (30+ second gaps)
 - Preserves meeting context without information loss
 
-### Summary Generation (Enhanced)
-- Processes **entire meeting** in batches of 35 entries
+### LLM-Driven Query Intelligence
+The system uses **dual LLM architecture** for optimal performance:
+- **Query Analyzer LLM** (gpt-4o-mini): Fast query intent analysis and filter generation
+- **Response Generator LLM** (gpt-4o): Comprehensive response generation with 60k token context
+- **No hardcoded logic**: All query analysis and decision-making is LLM-driven
+
+### Summary Generation (60k Token Enhanced)
+- Processes **entire meeting** in batches of 100 entries (increased from 35)
+- Uses 60k token context window for comprehensive analysis
 - Creates **structured fields** for optimized retrieval:
   - `meeting_purpose`: Brief description of meeting objective
   - `key_outcomes`: Main accomplishments and results
@@ -38,13 +45,13 @@ The system uses **Contextual Conversation Chunking** which:
   - `past_events`: References to previous meetings/projects
   - `future_actions`: Upcoming meetings and commitments
   - `detailed_narrative`: Comprehensive meeting flow with verbatim quotes
-- **Flexible LLM Response Parsing**: Regex-based extraction handles multiple formats (markdown headers, bold text, plain text)
+- **Dynamic Field Parsing**: Simple section-based extraction handles various LLM response formats
 
 ## Environment Setup
 
 ### Required Services
 - **Azure AI Search**: Vector storage and hybrid search (requires S1+ for semantic search)
-- **OpenAI**: text-embedding-3-small (1536 dimensions) + GPT-4 for generation
+- **OpenAI**: text-embedding-3-small (1536 dimensions) + dual LLM setup (gpt-4o + gpt-4o-mini)
 - **PostgreSQL**: Optional - only needed for database_exporter.py utility
 
 ### Environment Variables (.env)
@@ -130,34 +137,47 @@ venv/Scripts/python.exe database_exporter.py
 - **PDF**: Attempts both DOCX and VTT parsing strategies
 - **Metadata Extraction**: Title, date, time, duration from document headers
 
-### RAG Pipeline with Query Intent Detection
-1. **Query Analysis**: Detects intent (action items, decisions, topics, etc.)
-2. **Smart Retrieval**: 
-   - Targeted queries retrieve only relevant structured fields
-   - Complex queries retrieve full context
-   - Automatic field projection reduces token usage by 60-80%
-3. **Context Assembly**: Builds context from available fields dynamically
-4. **Generation**: LLM prompt with optimized context
-5. **Response**: Structured answer with source attribution
+### LLM-Driven RAG Pipeline
+1. **Query Analysis**: GPT-4o-mini analyzes user intent and generates search strategy
+2. **Dynamic Filter Generation**: Creates Azure AI Search filters (date, speaker, content, series)
+3. **Smart Field Selection**: Automatically selects optimal fields based on query intent
+4. **Context Assembly**: Builds 50k token context from retrieved fields
+5. **Response Generation**: GPT-4o generates comprehensive answers with source attribution
 
-### Query Optimization Patterns
-- **Action items queries** → Retrieves only: action_items, future_actions fields
-- **Decision queries** → Retrieves only: decisions_made field
-- **Topic queries** → Retrieves only: main_topics, meeting_purpose fields
-- **Outcome queries** → Retrieves only: key_outcomes field
-- **Complex queries** → Retrieves: detailed_narrative or full content
+### Intelligent Query Analysis Examples
+- **Temporal queries**: "July 14 meetings" → Generates `meeting_date` filters automatically
+- **Speaker queries**: "What did John say?" → Creates `speakers` filters + retrieves conversation content
+- **Intent-based queries**: "Action items" → Retrieves `action_items` and `future_actions` fields only
+- **Complex queries**: "Compare Q1 vs Q2 outcomes" → Multi-temporal analysis with comprehensive context
 
 ### Performance Considerations
-- Summary processing: 35-entry batches to balance completeness and token limits
-- Search context: 12,000 token limit with intelligent truncation
-- Azure Search index auto-creation with schema validation
-- Field-specific retrieval reduces LLM costs by 60-80% for targeted queries
-- Structured fields enable faster response times for common questions
+- **Summary processing**: 100-entry batches utilizing 60k token context window
+- **Search context**: 50k token context assembly with intelligent field selection
+- **LLM Cost Optimization**: Query analyzer (gpt-4o-mini) + targeted field retrieval reduces costs by 60-80%
+- **Dynamic Model Selection**: Easy model switching via `AVAILABLE_MODELS` configuration
+- **Zero Hardcoded Logic**: All decisions are LLM-driven for maximum flexibility
+
+### Model Configuration and Flexibility
+The system uses a flexible model configuration in `AVAILABLE_MODELS`:
+- **gpt-5**: Maps to gpt-4o for main response generation (16k tokens)
+- **gpt-4.1**: Maps to gpt-4o-mini for balanced performance (16k tokens)  
+- **query-analyzer**: Maps to gpt-4o-mini for fast query analysis (2k tokens)
+
+Global LLM initialization pattern:
+```python
+try:
+    access_token = get_access_token()
+    embedding_model = get_embedding_model(access_token)
+    llm = get_llm(access_token)
+    query_analyzer_llm = get_query_analyzer_llm(access_token)
+except Exception as e:
+    # All models set to None on failure
+```
 
 ### Error Handling
 - PostgreSQL uses `gen_random_uuid()` (not uuid-ossp extension)
 - Empty chunk uploads are skipped to avoid Azure Search errors
-- Token counting prevents LLM context overflow
+- Graceful degradation when query analyzer unavailable
 
 ## Testing Meeting Formats
 
@@ -172,9 +192,23 @@ The system handles meeting series detection via filename patterns and maintains 
 
 ### Common Issues
 - **Index creation fails**: Ensure Azure AI Search service is S1+ tier
-- **Token limit errors**: System automatically truncates context at 12,000 tokens
 - **Missing dependencies**: Install all requirements with `venv/Scripts/python.exe -m pip install -r requirements.txt`
 - **Authentication errors**: Verify OpenAI API key and Azure Search credentials in .env
-- **Empty structured fields**: LLM response parsing uses flexible regex that handles markdown (###), bold (**), and plain text formats
-- **Query not using optimized fields**: Verify query keywords match intent detection patterns
+- **Query analysis fails**: System gracefully degrades to basic search when query_analyzer_llm unavailable
+- **Empty structured fields**: Check LLM response parsing - uses simple section-based extraction
 - **Missing metadata fields**: Ensure document format matches expected patterns (title, date, time in first paragraph)
+
+## Architecture Principles
+
+### Direct Function Modification Approach
+- **No backup functions**: All enhancements modify existing functions directly
+- **No duplicate methods**: Prevents code drift and maintenance issues
+- **Human-readable code**: Implementations look natural, not AI-generated
+- **Single source of truth**: Each function has one clear purpose and implementation
+
+### LLM Integration Pattern
+When adding new LLM functionality:
+1. Add model config to `AVAILABLE_MODELS` 
+2. Create `get_*_llm()` function following existing pattern
+3. Add to global initialization block
+4. Modify existing methods directly (no new functions unless absolutely necessary)
