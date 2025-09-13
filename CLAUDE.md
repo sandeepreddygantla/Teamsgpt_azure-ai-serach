@@ -27,11 +27,22 @@ The system uses **Contextual Conversation Chunking** which:
 - Uses pause-based natural boundaries (30+ second gaps)
 - Preserves meeting context without information loss
 
+### Series Analysis Architecture
+The system provides advanced **multi-meeting series analysis**:
+- **Automatic Series Detection**: LLM detects series queries (e.g., "Document Fulfillment meetings")
+- **Meeting Aggregation**: Groups chunks by meeting_id, chronologically orders meetings
+- **Context Prioritization**: Summary chunks prioritized, then regular chunks from each meeting
+- **Cross-Meeting Insights**: Tracks themes, decisions, and action items across entire series
+- **Scalable Design**: Handles 100+ meetings per series with efficient token management
+- **Progressive Analysis**: Shows evolution of topics from first meeting to last meeting
+
 ### LLM-Driven Query Intelligence
 The system uses **dual LLM architecture** for optimal performance:
 - **Query Analyzer LLM** (gpt-4o-mini): Fast query intent analysis and filter generation
 - **Response Generator LLM** (gpt-4o): Comprehensive response generation with 60k token context
 - **No hardcoded logic**: All query analysis and decision-making is LLM-driven
+- **Case-insensitive fuzzy matching**: All searches use Azure AI Search's native case-insensitive matching
+- **Dynamic calendar awareness**: Query analyzer receives current date context for relative date queries
 
 ### Summary Generation (60k Token Enhanced)
 - Processes **entire meeting** in batches of 100 entries (increased from 35)
@@ -116,6 +127,24 @@ venv/Scripts/python.exe database_exporter.py
 # Exports data to exported_data/ directory
 ```
 
+### Advanced Query Testing Examples
+```bash
+# Series analysis queries
+venv/Scripts/python.exe meeting_rag_processor.py --search "summarize AIML series meetings"
+venv/Scripts/python.exe meeting_rag_processor.py --search "what topics were discussed in fulfillment meetings?"
+
+# Temporal queries with calendar awareness
+venv/Scripts/python.exe meeting_rag_processor.py --search "meetings from last week"
+venv/Scripts/python.exe meeting_rag_processor.py --search "what happened in July 2025?"
+
+# Case-insensitive speaker queries
+venv/Scripts/python.exe meeting_rag_processor.py --search "what did SANDEEP contribute to aiml meetings?"
+venv/Scripts/python.exe meeting_rag_processor.py --search "show me action items from Joseph and Michael"
+
+# Intent-specific queries
+venv/Scripts/python.exe meeting_rag_processor.py --search "what decisions were made across all Document Fulfillment meetings?"
+```
+
 ## Database Schema
 
 ### PostgreSQL Tables
@@ -138,17 +167,20 @@ venv/Scripts/python.exe database_exporter.py
 - **Metadata Extraction**: Title, date, time, duration from document headers
 
 ### LLM-Driven RAG Pipeline
-1. **Query Analysis**: GPT-4o-mini analyzes user intent and generates search strategy
-2. **Dynamic Filter Generation**: Creates Azure AI Search filters (date, speaker, content, series)
-3. **Smart Field Selection**: Automatically selects optimal fields based on query intent
-4. **Context Assembly**: Builds 50k token context from retrieved fields
-5. **Response Generation**: GPT-4o generates comprehensive answers with source attribution
+1. **Query Analysis**: GPT-4o-mini analyzes user intent and generates search strategy with current date context
+2. **Dynamic Filter Generation**: Creates case-insensitive Azure AI Search filters (date, speaker, content, series)
+3. **Smart Field Selection**: Automatically selects optimal fields + ensures meeting_id inclusion for series queries
+4. **Series-Aware Context Building**: Prioritizes summary chunks, groups by meeting_id, chronologically orders
+5. **Context Assembly**: Builds 50k token context from retrieved fields
+6. **Response Generation**: GPT-4o generates comprehensive answers with source attribution
 
 ### Intelligent Query Analysis Examples
-- **Temporal queries**: "July 14 meetings" → Generates `meeting_date` filters automatically
-- **Speaker queries**: "What did John say?" → Creates `speakers` filters + retrieves conversation content
+- **Temporal queries**: "last week meetings", "current month" → Dynamic calendar-based date range filters
+- **Series queries**: "fulfillment meetings", "aiml series" → Fuzzy series title matching with multi-meeting aggregation
+- **Speaker queries**: "What did john say?" → Case-insensitive speaker matching + conversation content retrieval
 - **Intent-based queries**: "Action items" → Retrieves `action_items` and `future_actions` fields only
 - **Complex queries**: "Compare Q1 vs Q2 outcomes" → Multi-temporal analysis with comprehensive context
+- **Casual queries**: "WHAT DID SANDEEP DO?" → Normalized to case-insensitive matching
 
 ### Performance Considerations
 - **Summary processing**: 100-entry batches utilizing 60k token context window
@@ -174,10 +206,15 @@ except Exception as e:
     # All models set to None on failure
 ```
 
-### Error Handling
-- PostgreSQL uses `gen_random_uuid()` (not uuid-ossp extension)
-- Empty chunk uploads are skipped to avoid Azure Search errors
-- Graceful degradation when query analyzer unavailable
+### Error Handling and User Experience
+- **PostgreSQL**: Uses `gen_random_uuid()` (not uuid-ossp extension)
+- **Azure Search**: Empty chunk uploads skipped to avoid errors
+- **LLM Graceful Degradation**: Basic search when query analyzer unavailable
+- **Contextual No-Results Responses**: 
+  - Speaker queries: Lists actual meeting participants with suggestions
+  - Date queries: Provides date range guidance and alternatives
+  - Series queries: Explains available meeting series
+  - Intent-specific: Tailored messages for decisions, action items, etc.
 
 ## Testing Meeting Formats
 
@@ -197,6 +234,8 @@ The system handles meeting series detection via filename patterns and maintains 
 - **Query analysis fails**: System gracefully degrades to basic search when query_analyzer_llm unavailable
 - **Empty structured fields**: Check LLM response parsing - uses simple section-based extraction
 - **Missing metadata fields**: Ensure document format matches expected patterns (title, date, time in first paragraph)
+- **Series queries showing duplicate dates**: meeting_id field automatically included in all queries for proper grouping
+- **Case-sensitive matching issues**: All search.ismatch() operations are inherently case-insensitive in Azure AI Search
 
 ## Architecture Principles
 

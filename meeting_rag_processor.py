@@ -1041,6 +1041,9 @@ class MeetingProcessor:
                     filter_expr = f"{filter_expr} and {content_filter}" if filter_expr else content_filter
                 
                 select_fields = query_analysis.get('optimal_fields')
+                # Ensure meeting_id is always included for proper grouping
+                if select_fields and 'meeting_id' not in select_fields:
+                    select_fields = select_fields + ['meeting_id']
                 use_summary_only = query_analysis.get('use_summary_chunks', False)
             else:
                 # Basic strategy when analyzer unavailable
@@ -1058,42 +1061,76 @@ class MeetingProcessor:
             if not results:
                 return self._generate_no_results_response(query, query_analysis)
             
-            # Build context optimized for 60k tokens
+            # Check if this is a series query
+            is_series_query = query_analysis.get('is_series_query', False)
+            intent = query_analysis.get('intent', 'general')
+            
+            # Build context optimized for 60k tokens with series-aware prioritization
             context_chunks = []
             total_tokens = 0
             max_context_tokens = 50000
             
-            for result in results:
-                chunk_parts = [f"Meeting: {result.get('meeting_title', result['meeting_id'])}"]
+            if is_series_query or intent == 'series_analysis':
+                context_chunks, total_tokens = self._build_series_context(results, max_context_tokens)
+                context = "\n---\n".join(context_chunks)
+                logger.info(f"Series context built: {len(context_chunks)} chunks, {total_tokens} tokens")
+            else:
+                # Original single-meeting context building
+                for result in results:
+                    chunk_parts = [f"Meeting: {result.get('meeting_title', result['meeting_id'])}"]
+                    
+                    if result.get('meeting_date'):
+                        chunk_parts.append(f"Date: {result['meeting_date'][:10]}")
+                    
+                    if 'speakers' in result and result['speakers']:
+                        chunk_parts.append(f"Speakers: {', '.join(result['speakers'])}")
+                    
+                    # Add relevant content based on available fields
+                    for field in ['action_items', 'decisions_made', 'main_topics', 'key_outcomes', 
+                                 'past_events', 'future_actions', 'meeting_purpose', 'detailed_narrative', 'content']:
+                        if result.get(field):
+                            field_name = field.replace('_', ' ').title()
+                            chunk_parts.append(f"{field_name}: {result[field]}")
+                    
+                    chunk_content = '\n'.join(chunk_parts) + '\n'
+                    chunk_tokens = len(self.chunker.encoder.encode(chunk_content))
+                    
+                    if total_tokens + chunk_tokens > max_context_tokens:
+                        break
+                    
+                    context_chunks.append(chunk_content)
+                    total_tokens += chunk_tokens
                 
-                if result.get('meeting_date'):
-                    chunk_parts.append(f"Date: {result['meeting_date'][:10]}")
-                
-                if 'speakers' in result and result['speakers']:
-                    chunk_parts.append(f"Speakers: {', '.join(result['speakers'])}")
-                
-                # Add relevant content based on available fields
-                for field in ['action_items', 'decisions_made', 'main_topics', 'key_outcomes', 
-                             'past_events', 'future_actions', 'meeting_purpose', 'detailed_narrative', 'content']:
-                    if result.get(field):
-                        field_name = field.replace('_', ' ').title()
-                        chunk_parts.append(f"{field_name}: {result[field]}")
-                
-                chunk_content = '\n'.join(chunk_parts) + '\n'
-                chunk_tokens = len(self.chunker.encoder.encode(chunk_content))
-                
-                if total_tokens + chunk_tokens > max_context_tokens:
-                    break
-                
-                context_chunks.append(chunk_content)
-                total_tokens += chunk_tokens
-            
-            context = "\n---\n".join(context_chunks)
+                context = "\n---\n".join(context_chunks)
             
             if not llm:
                 raise ValueError("LLM not available for response generation")
             
-            prompt = f"""Based on the following meeting transcripts, answer the user's question accurately and comprehensively.
+            # Generate series-aware prompt
+            meeting_ids = list(set([r['meeting_id'] for r in results]))
+            is_multi_meeting = len(meeting_ids) > 1
+            
+            if (is_series_query or intent == 'series_analysis') and is_multi_meeting:
+                prompt = f"""Based on the following meeting series transcripts, answer the user's question with comprehensive series-level analysis.
+
+User Question: {query}
+
+Meeting Series Transcripts ({len(meeting_ids)} meetings):
+{context}
+
+Instructions for Series Analysis:
+- Analyze information across ALL meetings in the series chronologically
+- Identify patterns, trends, and progression across meetings
+- Summarize key themes and developments throughout the series
+- Highlight important decisions and action items from the entire series
+- Show how topics evolved or were resolved across meetings
+- Organize your response to show the comprehensive series perspective
+- Include specific meeting dates and speakers when relevant
+- If information is missing from certain meetings, note it clearly
+
+Answer:"""
+            else:
+                prompt = f"""Based on the following meeting transcripts, answer the user's question accurately and comprehensively.
 
 User Question: {query}
 
@@ -1172,30 +1209,49 @@ Available fields: meeting_date, speakers (collection), participants (collection)
 
 IMPORTANT - Azure AI Search Filter Syntax:
 
-For Speaker Names (fuzzy matching):
-- search.ismatch('{{name}}*', 'speakers')
-- Examples: search.ismatch('Michael*', 'speakers'), search.ismatch('Sandeep*', 'speakers')
+For Speaker Names (case-insensitive fuzzy matching):
+- search.ismatch('name', 'speakers') (case-insensitive substring match)
+- Use lowercase for consistency: 'sandeep' matches 'Sandeep Reddy'
+- Examples: search.ismatch('michael', 'speakers'), search.ismatch('sandeep', 'speakers')
 
 For Dates (DateTimeOffset comparison):
 - meeting_date ge 2025-07-01T00:00:00Z (after July 1st 2025)
 - meeting_date eq 2025-07-14T00:00:00Z (exactly July 14th 2025)  
 - meeting_date ge 2025-07-01T00:00:00Z and meeting_date le 2025-07-07T23:59:59Z (date range)
+
+For Series/Meeting Title (case-insensitive fuzzy matching - PREFERRED):
+- search.ismatch('keyword', 'meeting_title') (case-insensitive substring match)
+- meeting_title eq 'Exact Title' (case-sensitive exact match)
+- series_id eq 'Exact Series Name' (case-sensitive exact series match)
+
+IMPORTANT: Extract key terms from user queries for flexible matching:
+- Users use informal names: "fulfillment meetings", "doc fulfillment", "AIML series"
+- search.ismatch() is case-insensitive: 'fulfillment' matches 'Document Fulfillment AIML'
+- Use lowercase for consistency: 'fulfillment', 'aiml', 'document'
+- search.ismatch() works without wildcards (wildcards don't work reliably)
+
 - Examples:
   - "July 14" → meeting_date eq 2025-07-14T00:00:00Z
   - "last week" → meeting_date ge {last_week_start}T00:00:00Z and meeting_date le {last_week_end}T23:59:59Z
   - "current week" → meeting_date ge {current_week_start}T00:00:00Z and meeting_date le {current_week_end}T23:59:59Z
   - "last month" → meeting_date ge {last_month_start}T00:00:00Z and meeting_date le {last_month_end}T23:59:59Z
   - "current month" → meeting_date ge {current_month_start}T00:00:00Z and meeting_date le {current_month_end}T23:59:59Z
-  - "December 2025" → search.ismatch('*2025-12*', 'meeting_date')
+  - "December 2025" → search.ismatch('2025-12', 'meeting_date')
+  - "Document Fulfillment meetings" → search.ismatch('fulfillment', 'meeting_title')
+  - "AIML meetings" → search.ismatch('aiml', 'meeting_title')  
+  - "fulfillment meetings" → search.ismatch('fulfillment', 'meeting_title')
+  - "doc fulfillment" → search.ismatch('document', 'meeting_title')
+  - "aiml series" → search.ismatch('aiml', 'meeting_title')
 
 Return JSON:
 {{
-    "intent": "summary|decisions|action_items|speaker_analysis|technical|general",
+    "intent": "summary|decisions|action_items|speaker_analysis|series_analysis|technical|general",
     "date_filter": "meeting_date filter expression or empty string",
     "speaker_filter": "search.ismatch('name*', 'speakers') format or empty string", 
     "content_filter": "series_id or meeting_title filter or empty string",
     "optimal_fields": ["list of best fields for this query"],
-    "use_summary_chunks": true/false
+    "use_summary_chunks": true/false,
+    "is_series_query": true/false
 }}
 
 Return only JSON, no explanation."""
@@ -1233,6 +1289,104 @@ Return only JSON, no explanation."""
         except Exception as e:
             logger.warning(f"Query analysis failed: {e}")
             return {}
+    
+    def _build_series_context(self, results, max_context_tokens):
+        """Build context for series queries with prioritized aggregation"""
+        context_chunks = []
+        total_tokens = 0
+        
+        # Group results by meeting_id and meeting_date for chronological ordering
+        meetings = {}
+        for result in results:
+            meeting_id = result.get('meeting_id', 'unknown')
+            meeting_date = result.get('meeting_date', 'unknown')
+            meeting_title = result.get('meeting_title', meeting_id)
+            
+            if meeting_id not in meetings:
+                meetings[meeting_id] = {
+                    'date': meeting_date,
+                    'title': meeting_title,
+                    'chunks': [],
+                    'summary_chunks': [],
+                    'regular_chunks': []
+                }
+            
+            # Prioritize summary chunks for series analysis
+            chunk_type = result.get('chunk_type', 'regular')
+            if chunk_type == 'summary':
+                meetings[meeting_id]['summary_chunks'].append(result)
+            else:
+                meetings[meeting_id]['regular_chunks'].append(result)
+        
+        # Sort meetings chronologically
+        sorted_meetings = sorted(meetings.items(), key=lambda x: x[1]['date'])
+        
+        # Build context with priority: summary chunks first, then regular chunks
+        for meeting_id, meeting_data in sorted_meetings:
+            meeting_title = meeting_data['title']
+            meeting_date = meeting_data['date'][:10] if meeting_data['date'] != 'unknown' else 'Unknown Date'
+            
+            # Add meeting header
+            meeting_header = f"\n=== MEETING: {meeting_title} ({meeting_date}) ===\n"
+            header_tokens = len(self.chunker.encoder.encode(meeting_header))
+            
+            if total_tokens + header_tokens > max_context_tokens:
+                break
+                
+            # Process summary chunks first (high priority for series analysis)
+            for result in meeting_data['summary_chunks']:
+                chunk_content = self._build_single_chunk(result, include_meeting_header=False)
+                chunk_tokens = len(self.chunker.encoder.encode(chunk_content))
+                
+                if total_tokens + header_tokens + chunk_tokens > max_context_tokens:
+                    break
+                    
+                if not context_chunks or not context_chunks[-1].startswith(f"\n=== MEETING: {meeting_title}"):
+                    context_chunks.append(meeting_header.strip())
+                    total_tokens += header_tokens
+                    header_tokens = 0  # Don't count again
+                
+                context_chunks.append(chunk_content)
+                total_tokens += chunk_tokens
+            
+            # Add regular chunks if there's remaining space
+            for result in meeting_data['regular_chunks']:
+                chunk_content = self._build_single_chunk(result, include_meeting_header=False)
+                chunk_tokens = len(self.chunker.encoder.encode(chunk_content))
+                
+                if total_tokens + header_tokens + chunk_tokens > max_context_tokens:
+                    break
+                    
+                if not context_chunks or not context_chunks[-1].startswith(f"\n=== MEETING: {meeting_title}"):
+                    context_chunks.append(meeting_header.strip())
+                    total_tokens += header_tokens
+                    header_tokens = 0
+                
+                context_chunks.append(chunk_content)
+                total_tokens += chunk_tokens
+        
+        return context_chunks, total_tokens
+    
+    def _build_single_chunk(self, result, include_meeting_header=True):
+        """Build a single chunk with consistent formatting"""
+        chunk_parts = []
+        
+        if include_meeting_header:
+            chunk_parts.append(f"Meeting: {result.get('meeting_title', result.get('meeting_id', 'Unknown'))}")
+            if result.get('meeting_date'):
+                chunk_parts.append(f"Date: {result['meeting_date'][:10]}")
+        
+        if 'speakers' in result and result['speakers']:
+            chunk_parts.append(f"Speakers: {', '.join(result['speakers'])}")
+        
+        # Add relevant content based on available fields
+        for field in ['action_items', 'decisions_made', 'main_topics', 'key_outcomes', 
+                     'past_events', 'future_actions', 'meeting_purpose', 'detailed_narrative', 'content']:
+            if result.get(field):
+                field_name = field.replace('_', ' ').title()
+                chunk_parts.append(f"{field_name}: {result[field]}")
+        
+        return '\n'.join(chunk_parts) + '\n'
     
     def _generate_no_results_response(self, query: str, query_analysis: dict) -> str:
         """Generate contextual response when no results are found"""
